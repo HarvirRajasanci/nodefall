@@ -1,0 +1,39 @@
+# Go binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go build cache
+*.test
+*.out
+go.sum.bak
+
+# Environment variables — never commit secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Docker
+.docker/
+
+# PostgreSQL local data
+postgres-data/
+
+# Redis local data
+redis-data/
+
+# Logs
+*.log
+
+# OS
+Thumbs.db
