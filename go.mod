@@ -3,3 +3,5 @@ module nodefall
 go 1.24.3
 
 require github.com/gorilla/websocket v1.5.3 // direct
+
+require github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
