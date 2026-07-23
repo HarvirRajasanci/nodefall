@@ -6,10 +6,10 @@ package jwt
 
 import (
 	"errors"
-	"os"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"nodefall/shared/config"
 )
 
 // tokenTTL is how long a token is valid after signing.
@@ -26,15 +26,9 @@ type claims struct {
 	jwt.RegisteredClaims
 }
 
-// secret loads the signing key from the environment on first use.
-// TODO: once shared/config exists, source this from there instead
-// of reading the env var directly here.
+// secret loads the signing key via shared/config.
 func secret() ([]byte, error) {
-	s := os.Getenv("NODEFALL_JWT_SECRET")
-	if s == "" {
-		return nil, errors.New("jwt: NODEFALL_JWT_SECRET not set")
-	}
-	return []byte(s), nil
+	return config.Load().RequireJWTSecret()
 }
 
 // Sign issues a new token for the given user ID, valid for tokenTTL.
@@ -49,10 +43,11 @@ func Sign(userID string) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims{
 		UserID: userID,
 		RegisteredClaims: jwt.RegisteredClaims{
-			IssuedAt: jwt.NewNumericDate(now),
+			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(tokenTTL)),
 		},
 	})
+
 	return token.SignedString(key)
 }
 
@@ -65,7 +60,7 @@ func Verify(tokenString string) (string, error) {
 		return "", err
 	}
 
-	parsed, err := jwt.ParseWithClaims(tokenString, &claims{}, func(t *jwt.Token) (any, error){
+	parsed, err := jwt.ParseWithClaims(tokenString, &claims{}, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, ErrInvalidToken
 		}
