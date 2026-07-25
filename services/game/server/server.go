@@ -10,6 +10,7 @@ import (
 	"github.com/coder/websocket"
 
 	"nodefall/services/game/engine"
+	"nodefall/shared/middleware"
 )
 
 // Engine is the subset of the game engine this package depends on.
@@ -35,20 +36,22 @@ func New(e Engine) *Server {
 }
 
 // ServeWS is the HTTP handler that upgrades a connection and blocks
-// for the lifetime of that connection.
+// for the lifetime of that connection. Must be wrapped with
+// middleware.WithAuth — the player ID comes from the verified JWT,
+// never from the request directly.
 func (s *Server) ServeWS(w http.ResponseWriter, r *http.Request) {
+	playerID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		http.Error(w, "missing verified identity", http.StatusUnauthorized)
+		return
+	}
+
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		// TODO: restrict to the real frontend origin before shipping.
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
 		log.Printf("websocket accept: %v", err)
-		return
-	}
-
-	playerID := r.PathValue("playerID") // set by auth/matchmaker upstream
-	if playerID == "" {
-		conn.Close(websocket.StatusPolicyViolation, "missing playerID")
 		return
 	}
 
@@ -89,8 +92,6 @@ func (s *Server) readPump(ctx context.Context, cancel context.CancelFunc, client
 	for {
 		_, data, err := client.conn.Read(ctx)
 		if err != nil {
-			// Includes normal close, client disconnect, and context
-			// cancellation — all of which should just end this pump.
 			return
 		}
 

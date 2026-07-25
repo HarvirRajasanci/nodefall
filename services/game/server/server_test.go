@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"github.com/coder/websocket"
 
 	"nodefall/services/game/engine"
+	"nodefall/shared/jwt"
+	"nodefall/shared/middleware"
 )
 
 // fakeEngine records every call it receives, so tests can assert on
@@ -65,19 +68,27 @@ func (f *fakeEngine) lastInput() engine.Input {
 	return f.inputs[len(f.inputs)-1]
 }
 
-// newTestServer wires a Server to a fake engine behind a real HTTP
-// server, so a real WebSocket client can dial in over the network.
+// newTestServer wires a Server (wrapped with middleware.WithAuth) to a
+// fake engine behind a real HTTP server, so a real WebSocket client can
+// dial in over the network with a real signed JWT.
 func newTestServer(t *testing.T, e *fakeEngine) (*httptest.Server, string) {
 	t.Helper()
 
+	os.Setenv("NODEFALL_JWT_SECRET", "test-secret-do-not-use-in-prod")
+
 	srv := New(e)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws/{playerID}", srv.ServeWS)
+	mux.Handle("/ws", middleware.WithAuth(http.HandlerFunc(srv.ServeWS)))
 
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 
-	wsURL := "ws" + ts.URL[len("http"):] + "/ws/player-1"
+	token, err := jwt.Sign("player-1")
+	if err != nil {
+		t.Fatalf("Sign failed: %v", err)
+	}
+
+	wsURL := "ws" + ts.URL[len("http"):] + "/ws?token=" + token
 	return ts, wsURL
 }
 
@@ -178,8 +189,6 @@ func TestServeWS_IgnoresMalformedInput(t *testing.T) {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	// Give the read pump a moment to process, then confirm the
-	// connection is still alive by sending valid input afterward.
 	time.Sleep(50 * time.Millisecond)
 
 	valid := engine.Input{Shoot: true}
@@ -196,7 +205,7 @@ func TestClient_Send_DropsWhenBufferFull(t *testing.T) {
 
 	client.Send([]byte("one"))
 	client.Send([]byte("two"))
-	client.Send([]byte("three")) // buffer full, should drop, not block or panic
+	client.Send([]byte("three"))
 
 	if len(client.send) != 2 {
 		t.Errorf("got %d buffered messages, want 2", len(client.send))

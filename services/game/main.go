@@ -9,6 +9,7 @@ import (
 
 	"nodefall/services/game/engine"
 	"nodefall/services/game/server"
+	"nodefall/shared/middleware"
 )
 
 func main() {
@@ -20,7 +21,7 @@ func main() {
 
 	srv := server.New(e)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws/{playerID}", srv.ServeWS)
+	mux.Handle("/ws", middleware.WithAuth(http.HandlerFunc(srv.ServeWS)))
 
 	httpServer := &http.Server{
 		Addr:    ":8081",
