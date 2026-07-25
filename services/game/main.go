@@ -1,30 +1,40 @@
 package main
 
 import (
-	"fmt"
+	"context"
 	"log"
 	"net/http"
+	"os/signal"
+	"syscall"
+
+	"nodefall/services/game/engine"
+	"nodefall/services/game/server"
 )
 
-func handleRegister(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "register called")
-}
-
-func handleLogin(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "login called")
-}
-
-func handleStats(w http.ResponseWriter, r *http.Request) {
-	userID := r.PathValue("userID")
-	fmt.Fprintf(w, "stats called for user %s", userID)
-}
-
 func main() {
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /register", handleRegister)
-	mux.HandleFunc("POST /login", handleLogin)
-	mux.HandleFunc("GET /stats/{userID}", handleStats)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	fmt.Println("Auth service running on :8080")
-	log.Fatal(http.ListenAndServe(":8080", mux))
+	e := engine.New()
+	go e.Run(ctx)
+
+	srv := server.New(e)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/{playerID}", srv.ServeWS)
+
+	httpServer := &http.Server{
+		Addr:    ":8081",
+		Handler: mux,
+	}
+
+	go func() {
+		<-ctx.Done()
+		log.Println("shutting down game server")
+		httpServer.Shutdown(context.Background())
+	}()
+
+	log.Println("game server running on :8081")
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
 }
