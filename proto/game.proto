@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package nodefall;
+
+option go_package = "shared/genproto";
+
+// StartMatch is called by the matchmaker once it has assembled a match,
+// telling a specific game server to initialize state for these players.
+service GameService {
+    rpc StartMatch(MatchRequest) returns (MatchResponse);
+}
+
+// MatchRequest carries everything a game server needs to initialize
+// a new match: which players are joining and under what match ID.
+message MatchRequest {
+    string match_id = 1;
+    repeated string player_ids = 2;
+}
+
+// MatchResponse confirms the game server accepted the match and tells
+// the matchmaker where to send players (used to build the WebSocket
+// URL the client connects to).
+message MatchResponse {
+    bool accepted = 1;
+    string server_addr = 2;
+}
