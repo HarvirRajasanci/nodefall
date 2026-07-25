@@ -32,6 +32,10 @@ const (
 	ItemCount          = 35
 	ArmourPickupAmount = 50
 
+	// Combat
+	FireRate     = 300 * time.Millisecond
+	BulletDamage = 20
+
 	// Game loop
 	TickRate     = 50 * time.Millisecond // 20 ticks/sec
 	RespawnDelay = 5 * time.Second
