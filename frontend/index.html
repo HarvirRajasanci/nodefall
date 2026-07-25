@@ -9,18 +9,21 @@
     position: fixed; top: 8px; left: 8px; color: #eee;
     font: 14px monospace; z-index: 1;
   }
-  #connectBar {
+  #loginBar {
     position: fixed; top: 8px; right: 8px; z-index: 1;
+    display: flex; gap: 4px;
   }
   input, button { font: 14px monospace; }
+  #error { color: #f66; }
 </style>
 </head>
 <body>
 
 <div id="hud">Not connected</div>
-<div id="connectBar">
-  <input id="playerID" placeholder="player ID" value="player-1">
-  <button id="connectBtn">Connect</button>
+<div id="loginBar">
+  <input id="username" placeholder="username">
+  <input id="password" placeholder="password" type="password">
+  <button id="loginBtn">Login & Play</button>
 </div>
 <canvas id="game"></canvas>
 
@@ -32,32 +35,64 @@ const hud = document.getElementById("hud");
 canvas.width = window.innerWidth;
 canvas.height = window.innerHeight;
 
-const MAP_SIZE = 3000; // must match world.MapSize
-const PLAYER_RADIUS = 16; // must match world.PlayerRadius
-const BULLET_RADIUS = 6;  // must match world.BulletRadius
-const ITEM_RADIUS = 18;   // must match world.ItemRadius
+const AUTH_URL = "http://localhost:8082";
+const GAME_WS_URL = "ws://localhost:8081/ws";
+
+const MAP_SIZE = 3000;
+const PLAYER_RADIUS = 16;
+const BULLET_RADIUS = 6;
+const ITEM_RADIUS = 18;
 
 let ws = null;
 let state = { players: [], bullets: [], items: [], zone: null };
 let selfID = null;
 
-// Camera follows the local player, so a MAP_SIZE-scale world fits on screen.
 let camera = { x: 0, y: 0 };
-
 const input = { dx: 0, dy: 0, angle: 0, shoot: false };
 const keys = {};
 
-document.getElementById("connectBtn").addEventListener("click", () => {
-  const id = document.getElementById("playerID").value.trim();
-  if (!id) return;
-  connect(id);
-});
+document.getElementById("loginBtn").addEventListener("click", loginAndConnect);
 
-function connect(playerID) {
-  selfID = playerID;
-  ws = new WebSocket(`ws://localhost:8081/ws/${encodeURIComponent(playerID)}`);
+async function loginAndConnect() {
+  const username = document.getElementById("username").value.trim();
+  const password = document.getElementById("password").value;
+  if (!username || !password) return;
 
-  ws.onopen = () => { hud.textContent = `connected as ${playerID}`; };
+  hud.textContent = "logging in...";
+
+  try {
+    const res = await fetch(`${AUTH_URL}/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+
+    if (!res.ok) {
+      hud.textContent = `login failed (${res.status})`;
+      return;
+    }
+
+    const { token } = await res.json();
+    selfID = decodeUserID(token);
+    connect(token);
+  } catch (err) {
+    hud.textContent = "login request failed: " + err.message;
+  }
+}
+
+// Decodes the JWT payload client-side (no signature check — this is
+// purely for the UI to know its own player ID, not a security check;
+// the server independently verifies the token via shared/jwt.Verify).
+function decodeUserID(token) {
+  const payload = token.split(".")[1];
+  const json = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
+  return JSON.parse(json).user_id;
+}
+
+function connect(token) {
+  ws = new WebSocket(`${GAME_WS_URL}?token=${encodeURIComponent(token)}`);
+
+  ws.onopen = () => { hud.textContent = `connected as ${selfID}`; };
   ws.onclose = () => { hud.textContent = "disconnected"; };
   ws.onerror = () => { hud.textContent = "connection error"; };
 
@@ -80,8 +115,6 @@ canvas.addEventListener("mousemove", (e) => {
 canvas.addEventListener("mousedown", () => { input.shoot = true; });
 canvas.addEventListener("mouseup", () => { input.shoot = false; });
 
-// Sends the current input state to the server at a fixed rate,
-// independent of render/animation frame timing.
 setInterval(() => {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
@@ -89,7 +122,7 @@ setInterval(() => {
   input.dy = (keys["s"] ? 1 : 0) - (keys["w"] ? 1 : 0);
 
   ws.send(JSON.stringify(input));
-}, 50); // 20/sec, matching world.TickRate
+}, 50);
 
 // --- Rendering ---
 
@@ -110,7 +143,6 @@ function draw() {
     camera.y = self.y;
   }
 
-  // Zone
   if (state.zone) {
     const c = worldToScreen(state.zone.x, state.zone.y);
     ctx.strokeStyle = "#4af";
@@ -120,7 +152,6 @@ function draw() {
     ctx.stroke();
   }
 
-  // Items
   ctx.fillStyle = "#fc4";
   for (const item of state.items ?? []) {
     const p = worldToScreen(item.x, item.y);
@@ -129,7 +160,6 @@ function draw() {
     ctx.fill();
   }
 
-  // Bullets
   ctx.fillStyle = "#ff4";
   for (const bullet of state.bullets ?? []) {
     const p = worldToScreen(bullet.x, bullet.y);
@@ -138,7 +168,6 @@ function draw() {
     ctx.fill();
   }
 
-  // Players
   for (const player of state.players ?? []) {
     if (!player.alive) continue;
     const p = worldToScreen(player.x, player.y);
@@ -148,7 +177,6 @@ function draw() {
     ctx.arc(p.x, p.y, PLAYER_RADIUS, 0, Math.PI * 2);
     ctx.fill();
 
-    // Facing direction
     ctx.strokeStyle = "#fff";
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -156,7 +184,6 @@ function draw() {
     ctx.lineTo(p.x + Math.cos(player.angle) * PLAYER_RADIUS * 1.5, p.y + Math.sin(player.angle) * PLAYER_RADIUS * 1.5);
     ctx.stroke();
 
-    // HP bar
     ctx.fillStyle = "#333";
     ctx.fillRect(p.x - 20, p.y - PLAYER_RADIUS - 12, 40, 5);
     ctx.fillStyle = "#4f8";
@@ -166,7 +193,7 @@ function draw() {
   if (selfID) {
     const self = state.players?.find((p) => p.id === selfID);
     if (self) {
-      hud.textContent = `${selfID} — HP ${self.hp}  Armour ${self.armour}  Gun ${self.gun}${self.alive ? "" : "  (DEAD)"}`;
+      hud.textContent = `${selfID.slice(0,8)} — HP ${self.hp}  Armour ${self.armour}  Gun ${self.gun}${self.alive ? "" : "  (DEAD)"}`;
     }
   }
 
