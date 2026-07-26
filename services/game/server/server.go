@@ -13,36 +13,48 @@ import (
 	"nodefall/shared/middleware"
 )
 
-// Engine is the subset of the game engine this package depends on.
-// Parameters use engine.Client (an interface engine already defines),
-// so any concrete *engine.Engine satisfies this without server needing
-// to import anything from engine beyond its two small public types.
-type Engine interface {
-	Join(client engine.Client)
-	Leave(client engine.Client)
-	HandleInput(client engine.Client, input engine.Input)
+// MatchManager is the subset of matchmanager.Manager this package
+// depends on: looking up an already-created match by ID. Server never
+// creates matches itself — that happens via the gRPC StartMatch
+// handler in grpc.go.
+type MatchManager interface {
+	Get(matchID string) (*engine.Engine, bool)
 }
 
-// Server upgrades HTTP connections to WebSockets and wires each one
-// to the engine as a Client. It knows nothing about game rules —
-// that lives entirely in engine/world.
+// Server upgrades HTTP connections to WebSockets, looks up the
+// requested match, and wires the connection to that match's engine.
+// It knows nothing about game rules — that lives entirely in
+// engine/world.
 type Server struct {
-	engine Engine
+	matches MatchManager
 }
 
-// New creates a Server that forwards connections to the given engine.
-func New(e Engine) *Server {
-	return &Server{engine: e}
+// New creates a Server that routes connections through the given
+// match manager.
+func New(m MatchManager) *Server {
+	return &Server{matches: m}
 }
 
 // ServeWS is the HTTP handler that upgrades a connection and blocks
 // for the lifetime of that connection. Must be wrapped with
-// middleware.WithAuth — the player ID comes from the verified JWT,
-// never from the request directly.
+// middleware.WithAuth — the player ID comes from the verified JWT.
+// The target match is given via the "match" query parameter.
 func (s *Server) ServeWS(w http.ResponseWriter, r *http.Request) {
 	playerID, ok := middleware.UserIDFromContext(r.Context())
 	if !ok {
 		http.Error(w, "missing verified identity", http.StatusUnauthorized)
+		return
+	}
+
+	matchID := r.URL.Query().Get("match")
+	if matchID == "" {
+		http.Error(w, "missing match id", http.StatusBadRequest)
+		return
+	}
+
+	e, ok := s.matches.Get(matchID)
+	if !ok {
+		http.Error(w, "match not found", http.StatusNotFound)
 		return
 	}
 
@@ -61,12 +73,12 @@ func (s *Server) ServeWS(w http.ResponseWriter, r *http.Request) {
 		send: make(chan []byte, 16),
 	}
 
-	s.engine.Join(client)
-	defer s.engine.Leave(client)
+	if !e.Join(client) {
+		conn.Close(websocket.StatusPolicyViolation, "not part of this match")
+		return
+	}
+	defer e.Leave(client)
 
-	// Connection lifetime is tied to this context — closing it (client
-	// disconnect, server shutdown, or an explicit call) tears down both
-	// pumps below.
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
@@ -78,16 +90,16 @@ func (s *Server) ServeWS(w http.ResponseWriter, r *http.Request) {
 	}()
 	go func() {
 		defer wg.Done()
-		s.readPump(ctx, cancel, client)
+		s.readPump(ctx, cancel, client, e)
 	}()
 	wg.Wait()
 
 	conn.Close(websocket.StatusNormalClosure, "connection closed")
 }
 
-// readPump reads and decodes client input, forwarding it to the engine.
-// Runs until the context is cancelled or the read fails.
-func (s *Server) readPump(ctx context.Context, cancel context.CancelFunc, client *Client) {
+// readPump reads and decodes client input, forwarding it to e. Runs
+// until the context is cancelled or the read fails.
+func (s *Server) readPump(ctx context.Context, cancel context.CancelFunc, client *Client, e *engine.Engine) {
 	defer cancel()
 	for {
 		_, data, err := client.conn.Read(ctx)
@@ -101,6 +113,6 @@ func (s *Server) readPump(ctx context.Context, cancel context.CancelFunc, client
 			continue
 		}
 
-		s.engine.HandleInput(client, input)
+		e.HandleInput(client, input)
 	}
 }
