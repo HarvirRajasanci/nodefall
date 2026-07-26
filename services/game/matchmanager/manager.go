@@ -1,14 +1,8 @@
-// Package matchmanager holds and manages multiple concurrent matches
-// (each its own *engine.Engine), keyed by match ID. This is what makes
-// it possible for the game server to run more than one match at a time
-// rather than a single perpetual world.
 package matchmanager
 
 import (
 	"context"
 	"sync"
-
-	"github.com/google/uuid"
 
 	"nodefall/services/game/engine"
 )
@@ -31,19 +25,17 @@ func New(ctx context.Context) *Manager {
 }
 
 // CreateMatch creates a new engine restricted to playerIDs, starts its
-// tick loop on its own goroutine, registers it under a fresh match ID,
-// and returns that ID.
-func (m *Manager) CreateMatch(playerIDs []string) string {
+// tick loop on its own goroutine, and registers it under matchID. The
+// caller (the gRPC StartMatch handler) supplies matchID rather than
+// this generating its own, since whoever calls StartMatch — the
+// matchmaker — needs to already know the ID to hand to players.
+func (m *Manager) CreateMatch(matchID string, playerIDs []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	matchID := uuid.New().String()
 	e := engine.NewForPlayers(playerIDs)
-
 	m.matches[matchID] = e
 	go e.Run(m.ctx)
-
-	return matchID
 }
 
 // Get returns the engine for the given match ID, and whether it exists.
@@ -56,10 +48,8 @@ func (m *Manager) Get(matchID string) (*engine.Engine, bool) {
 
 // Remove deletes a match from the manager. The match's own tick loop
 // keeps running until ctx is cancelled — Remove only stops the manager
-// from routing new connections to it. In practice this project doesn't
-// currently call Remove anywhere; matches simply persist for the life
-// of the server. Provided for completeness and future cleanup logic
-// (e.g. removing matches that have had zero players for some time).
+// from routing new connections to it. Not currently called anywhere;
+// provided for future idle-match cleanup.
 func (m *Manager) Remove(matchID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

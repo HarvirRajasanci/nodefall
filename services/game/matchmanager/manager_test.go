@@ -2,27 +2,17 @@ package matchmanager
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
 
-func TestCreateMatch_ReturnsUniqueIDs(t *testing.T) {
+func TestCreateMatch_RegistersUnderGivenID(t *testing.T) {
 	m := New(context.Background())
 
-	id1 := m.CreateMatch([]string{"player-1"})
-	id2 := m.CreateMatch([]string{"player-2"})
+	m.CreateMatch("match-1", []string{"player-1"})
 
-	if id1 == id2 {
-		t.Error("got the same match ID for two different CreateMatch calls, want unique IDs")
-	}
-}
-
-func TestCreateMatch_RegistersRetrievableEngine(t *testing.T) {
-	m := New(context.Background())
-
-	matchID := m.CreateMatch([]string{"player-1"})
-
-	e, ok := m.Get(matchID)
+	e, ok := m.Get("match-1")
 	if !ok {
 		t.Fatal("Get returned ok=false for a match ID that was just created")
 	}
@@ -44,8 +34,8 @@ func TestGet_ReturnsFalseForUnknownMatchID(t *testing.T) {
 func TestCreateMatch_EngineOnlyAllowsAssignedPlayers(t *testing.T) {
 	m := New(context.Background())
 
-	matchID := m.CreateMatch([]string{"player-1", "player-2"})
-	e, _ := m.Get(matchID)
+	m.CreateMatch("match-1", []string{"player-1", "player-2"})
+	e, _ := m.Get("match-1")
 
 	if ok := e.Join(&fakeClient{id: "player-1"}); !ok {
 		t.Error("assigned player was rejected")
@@ -56,43 +46,54 @@ func TestCreateMatch_EngineOnlyAllowsAssignedPlayers(t *testing.T) {
 }
 
 func TestCreateMatch_StartsRunningTickLoop(t *testing.T) {
-	// Confirms the engine's Run() loop is actually ticking on its own
-	// goroutine — join a player, wait slightly longer than one real
-	// tick, and confirm a snapshot was broadcast without ever calling
-	// Tick() manually.
 	m := New(context.Background())
-	matchID := m.CreateMatch([]string{"player-1"})
-	e, _ := m.Get(matchID)
+	m.CreateMatch("match-1", []string{"player-1"})
+	e, _ := m.Get("match-1")
 
 	client := &fakeClient{id: "player-1"}
 	e.Join(client)
 
 	time.Sleep(100 * time.Millisecond) // world.TickRate is 50ms
 
-	if len(client.msgs) == 0 {
+	if client.msgCount() == 0 {
 		t.Error("no messages received — engine's Run() loop does not appear to be ticking")
 	}
 }
 
 func TestRemove_DeletesMatchFromManager(t *testing.T) {
 	m := New(context.Background())
-	matchID := m.CreateMatch([]string{"player-1"})
+	m.CreateMatch("match-1", []string{"player-1"})
 
-	m.Remove(matchID)
+	m.Remove("match-1")
 
-	_, ok := m.Get(matchID)
+	_, ok := m.Get("match-1")
 	if ok {
 		t.Error("match still retrievable after Remove")
 	}
 }
 
-// fakeClient is a minimal engine.Client for testing, duplicated here
-// (rather than imported) since engine's fakeClient is unexported and
-// test-only within its own package.
+// fakeClient is a minimal engine.Client for testing. It's accessed
+// from two goroutines at once here — the engine's own Run() loop
+// calls Send, while the test's main goroutine reads the message
+// count after sleeping — so it needs its own mutex, unlike the
+// simpler fakeClient in engine's own tests, which is only ever
+// touched from the single test goroutine directly.
 type fakeClient struct {
+	mu   sync.Mutex
 	id   string
 	msgs [][]byte
 }
 
-func (f *fakeClient) ID() string      { return f.id }
-func (f *fakeClient) Send(msg []byte) { f.msgs = append(f.msgs, msg) }
+func (f *fakeClient) ID() string { return f.id }
+
+func (f *fakeClient) Send(msg []byte) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.msgs = append(f.msgs, msg)
+}
+
+func (f *fakeClient) msgCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.msgs)
+}
