@@ -19,8 +19,7 @@ func (f *fakeClient) ID() string      { return f.id }
 func (f *fakeClient) Send(msg []byte) { f.msgs = append(f.msgs, msg) }
 
 // makeLive bypasses the real MatchStartDelay wait so tests that need
-// immediate simulation don't have to sleep for real time. Same
-// direct-field-access pattern used elsewhere in this package's tests.
+// immediate simulation don't have to sleep for real time.
 func makeLive(e *Engine) {
 	e.phase = PhaseLive
 }
@@ -203,6 +202,10 @@ func TestTick_BulletMovesAndCanExpire(t *testing.T) {
 	e := New()
 	client := &fakeClient{id: "player-1"}
 	e.Join(client)
+	// Add a second player so checkMatchEnd doesn't immediately end the
+	// match with the lone player as winner before the bullet gets a
+	// chance to move.
+	e.Join(&fakeClient{id: "player-2"})
 	makeLive(e)
 	e.HandleInput(client, Input{Shoot: true})
 	startX := e.bullets[0].X
@@ -241,6 +244,7 @@ func TestCheckBulletCollisions_LethalHitSchedulesRespawn(t *testing.T) {
 	e := New()
 	client := &fakeClient{id: "player-1"}
 	e.Join(client)
+	e.Join(&fakeClient{id: "player-2"}) // keep 2 alive so checkMatchEnd doesn't end the match
 	makeLive(e)
 	e.players["player-1"].X, e.players["player-1"].Y = 500, 500
 
@@ -319,5 +323,120 @@ func TestTick_BroadcastsSnapshotToClients(t *testing.T) {
 
 	if len(client.msgs) != 1 {
 		t.Fatalf("got %d messages sent, want 1", len(client.msgs))
+	}
+}
+
+func TestCheckMatchEnd_DeclaresWinnerWhenOnePlayerRemainsAlive(t *testing.T) {
+	e := New()
+	e.Join(&fakeClient{id: "winner"})
+	e.Join(&fakeClient{id: "loser"})
+	makeLive(e)
+	e.players["loser"].Alive = false
+
+	e.checkMatchEnd()
+
+	if e.phase != PhaseEnded {
+		t.Errorf("got phase %v, want %v", e.phase, PhaseEnded)
+	}
+	if e.winner != "winner" {
+		t.Errorf("got winner %q, want %q", e.winner, "winner")
+	}
+}
+
+func TestCheckMatchEnd_NoWinnerWhenEveryoneDies(t *testing.T) {
+	e := New()
+	e.Join(&fakeClient{id: "player-1"})
+	e.Join(&fakeClient{id: "player-2"})
+	makeLive(e)
+	e.players["player-1"].Alive = false
+	e.players["player-2"].Alive = false
+
+	e.checkMatchEnd()
+
+	if e.phase != PhaseEnded {
+		t.Errorf("got phase %v, want %v", e.phase, PhaseEnded)
+	}
+	if e.winner != "" {
+		t.Errorf("got winner %q, want empty (no survivors)", e.winner)
+	}
+}
+
+func TestCheckMatchEnd_ContinuesWithMultipleSurvivors(t *testing.T) {
+	e := New()
+	e.Join(&fakeClient{id: "player-1"})
+	e.Join(&fakeClient{id: "player-2"})
+	makeLive(e)
+
+	e.checkMatchEnd()
+
+	if e.phase != PhaseLive {
+		t.Errorf("got phase %v, want %v — both players still alive", e.phase, PhaseLive)
+	}
+}
+
+func TestCheckMatchEnd_ResetsImmediatelyWhenNoPlayersConnected(t *testing.T) {
+	e := New()
+	e.Join(&fakeClient{id: "player-1"})
+	makeLive(e)
+	e.Leave(&fakeClient{id: "player-1"})
+
+	e.checkMatchEnd()
+
+	if e.phase != PhaseWaiting {
+		t.Errorf("got phase %v, want %v — no players connected", e.phase, PhaseWaiting)
+	}
+}
+
+func TestTickEnded_ResetsAfterDelayElapses(t *testing.T) {
+	e := New()
+	client := &fakeClient{id: "player-1"}
+	e.Join(client)
+	e.phase = PhaseEnded
+	e.winner = "player-1"
+	e.endedAt = time.Now().Add(-world.ResetDelay - time.Second)
+
+	e.Tick()
+
+	if e.phase != PhaseWaiting {
+		t.Errorf("got phase %v, want %v", e.phase, PhaseWaiting)
+	}
+	if e.winner != "" {
+		t.Errorf("got winner %q, want cleared after reset", e.winner)
+	}
+	if !e.players["player-1"].Alive {
+		t.Error("connected player not revived after reset")
+	}
+}
+
+func TestTickEnded_StaysEndedBeforeDelayElapses(t *testing.T) {
+	e := New()
+	e.Join(&fakeClient{id: "player-1"})
+	e.phase = PhaseEnded
+	e.endedAt = time.Now()
+
+	e.Tick()
+
+	if e.phase != PhaseEnded {
+		t.Errorf("got phase %v, want %v", e.phase, PhaseEnded)
+	}
+}
+
+func TestResetMatch_GivesFreshZoneAndItems(t *testing.T) {
+	e := New()
+	e.Join(&fakeClient{id: "player-1"})
+	makeLive(e)
+	oldZone := e.zone
+	e.zone.Radius = 10 // simulate a heavily shrunk zone
+
+	e.resetMatch()
+
+	if e.zone == oldZone {
+		t.Error("zone was not replaced on reset")
+	}
+	if e.zone.Radius != world.ZoneInitialRadius {
+		t.Errorf("got Radius %v, want fresh %v", e.zone.Radius, world.ZoneInitialRadius)
+	}
+	if len(e.items) != world.ItemCount {
+		t.Errorf("got %d items, want %d", len(e.items), world.ItemCount)
 	}
 }

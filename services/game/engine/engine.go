@@ -28,19 +28,20 @@ type Input struct {
 	Shoot bool    `json:"shoot"`
 }
 
-// Phase describes whether the match is still waiting for players
-// (no simulation runs, no input is applied) or live.
+// Phase describes the current stage of the match.
 type Phase string
 
 const (
-	PhaseWaiting Phase = "waiting"
-	PhaseLive    Phase = "live"
+	PhaseWaiting Phase = "waiting" // no simulation, waiting for MatchStartDelay
+	PhaseLive    Phase = "live"    // match in progress
+	PhaseEnded   Phase = "ended"   // winner decided, showing result before reset
 )
 
 // Snapshot is the per-tick state broadcast to every connected client.
 type Snapshot struct {
 	Phase            Phase           `json:"phase"`
 	CountdownSeconds int             `json:"countdown_seconds"`
+	Winner           string          `json:"winner,omitempty"`
 	Players          []*world.Player `json:"players"`
 	Bullets          []*world.Bullet `json:"bullets"`
 	Items            []*world.Item   `json:"items"`
@@ -62,13 +63,13 @@ type Engine struct {
 	respawnAt map[string]time.Time // playerID -> when they respawn
 
 	phase       Phase
-	waitStarted time.Time // zero until the first player joins
+	waitStarted time.Time // zero until the first player joins a waiting match
+	endedAt     time.Time // zero until the match ends
+	winner      string    // playerID of the winner, empty if no one won
 }
 
 // New creates an engine with a fresh zone and item spawn, ready to
-// accept players. Starts in PhaseWaiting — no simulation runs and no
-// input is applied until enough real time has passed after the first
-// player joins (world.MatchStartDelay).
+// accept players. Starts in PhaseWaiting.
 func New() *Engine {
 	return &Engine{
 		players:   make(map[string]*world.Player),
@@ -108,7 +109,7 @@ func (e *Engine) Leave(client Client) {
 
 // HandleInput applies one decoded player action: movement, aim angle,
 // and an optional shot. Ignored if the client is unknown, the player
-// is currently dead, or the match hasn't gone live yet.
+// is currently dead, or the match isn't live.
 func (e *Engine) HandleInput(client Client, input Input) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -147,29 +148,106 @@ func (e *Engine) Run(ctx context.Context) {
 	}
 }
 
-// Tick advances the match by one fixed timestep. While PhaseWaiting,
-// only the phase transition and broadcast happen — no bullets move,
-// no zone damage applies, no respawns process. Exported so tests can
-// drive the engine tick-by-tick without waiting on a real ticker.
+// Tick advances the match by one fixed timestep, dispatching on the
+// current phase. Exported so tests can drive the engine tick-by-tick
+// without waiting on a real ticker.
 func (e *Engine) Tick() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if e.phase == PhaseWaiting {
-		if !e.waitStarted.IsZero() && time.Since(e.waitStarted) >= world.MatchStartDelay {
-			e.phase = PhaseLive
-		}
-		e.broadcast()
-		return
+	switch e.phase {
+	case PhaseWaiting:
+		e.tickWaiting()
+	case PhaseEnded:
+		e.tickEnded()
+	default:
+		e.tickLive()
 	}
 
+	e.broadcast()
+}
+
+// tickWaiting checks whether enough real time has passed since the
+// first player joined to start the match.
+func (e *Engine) tickWaiting() {
+	if !e.waitStarted.IsZero() && time.Since(e.waitStarted) >= world.MatchStartDelay {
+		e.phase = PhaseLive
+	}
+}
+
+// tickLive runs full simulation and checks whether the match has ended.
+func (e *Engine) tickLive() {
 	e.moveBullets()
 	e.checkBulletCollisions()
 	e.checkItemPickups()
 	e.zone.Shrink()
 	e.applyZoneDamage()
 	e.processRespawns()
-	e.broadcast()
+	e.checkMatchEnd()
+}
+
+// checkMatchEnd ends the match once at most one connected player is
+// still alive. If no players are connected at all, resets immediately
+// with no winner to show. If exactly one is alive, they're declared
+// the winner and the match moves to PhaseEnded to display the result
+// briefly before resetting.
+func (e *Engine) checkMatchEnd() {
+	if len(e.players) == 0 {
+		e.resetMatch()
+		return
+	}
+
+	var aliveCount int
+	var lastAliveID string
+	for id, p := range e.players {
+		if p.Alive {
+			aliveCount++
+			lastAliveID = id
+		}
+	}
+
+	if aliveCount > 1 {
+		return
+	}
+
+	e.phase = PhaseEnded
+	e.endedAt = time.Now()
+	if aliveCount == 1 {
+		e.winner = lastAliveID
+	} else {
+		e.winner = "" // everyone died simultaneously — no winner
+	}
+}
+
+// tickEnded waits out world.ResetDelay before resetting the match.
+func (e *Engine) tickEnded() {
+	if time.Since(e.endedAt) >= world.ResetDelay {
+		e.resetMatch()
+	}
+}
+
+// resetMatch clears bullets, respawns a fresh zone and item spread,
+// and respawns every still-connected player at full health, then
+// returns to PhaseWaiting for a new countdown.
+func (e *Engine) resetMatch() {
+	e.bullets = nil
+	e.items = world.SpawnItems(world.ItemCount)
+	e.zone = world.NewZone()
+	e.respawnAt = make(map[string]time.Time)
+	e.winner = ""
+	e.endedAt = time.Time{}
+
+	for _, player := range e.players {
+		x, y := randomSpawn()
+		player.Respawn(x, y)
+	}
+
+	e.phase = PhaseWaiting
+	if len(e.players) > 0 {
+		e.waitStarted = time.Now()
+	} else {
+		e.waitStarted = time.Time{}
+	}
 }
 
 // moveBullets advances every bullet and drops any that expired this tick.
@@ -277,6 +355,7 @@ func (e *Engine) snapshot() Snapshot {
 	return Snapshot{
 		Phase:            e.phase,
 		CountdownSeconds: countdown,
+		Winner:           e.winner,
 		Players:          players,
 		Bullets:          e.bullets,
 		Items:            e.items,

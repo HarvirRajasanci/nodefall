@@ -29,6 +29,7 @@ export default function PlayPage() {
   const [connectionPhase, setConnectionPhase] = useState("connecting");
   const [matchPhase, setMatchPhase] = useState("waiting");
   const [countdown, setCountdown] = useState(0);
+  const [winner, setWinner] = useState("");
 
   useEffect(() => {
     if (!token) return;
@@ -69,6 +70,7 @@ export default function PlayPage() {
       currStateTime = performance.now();
       setMatchPhase(next.phase);
       setCountdown(next.countdown_seconds ?? 0);
+      setWinner(next.winner ?? "");
     };
 
     function setHud(text) {
@@ -232,7 +234,8 @@ export default function PlayPage() {
     return <Navigate to="/login" replace />;
   }
 
-  const showOverlay = connectionPhase === "connecting" || matchPhase === "waiting";
+  const showOverlay =
+    connectionPhase === "connecting" || matchPhase === "waiting" || matchPhase === "ended";
 
   return (
     <div className="relative">
@@ -272,6 +275,17 @@ export default function PlayPage() {
           </div>
           <p className="text-gray-500 text-sm font-mono tracking-wide">
             MATCH STARTING
+          </p>
+        </div>
+      )}
+
+      {matchPhase === "ended" && (
+        <div className="fixed inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-gray-950/90">
+          <div className="text-emerald-400 text-4xl font-mono font-bold tracking-wide">
+            {winner === userID ? "YOU WIN" : winner ? "MATCH OVER" : "DRAW"}
+          </div>
+          <p className="text-gray-500 text-sm font-mono tracking-wide">
+            NEXT MATCH STARTING SOON
           </p>
         </div>
       )}
