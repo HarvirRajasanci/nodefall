@@ -27,6 +27,9 @@ func main() {
 	if err := database.EnsureSchema(ctx); err != nil {
 		log.Fatalf("ensuring schema: %v", err)
 	}
+	if err := database.EnsureFriendsSchema(ctx); err != nil {
+		log.Fatalf("ensuring friends schema: %v", err)
+	}
 
 	h := &handlers{db: database}
 
@@ -37,6 +40,10 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("POST /register", limiter.Wrap(http.HandlerFunc(h.handleRegister)))
 	mux.Handle("POST /login", limiter.Wrap(http.HandlerFunc(h.handleLogin)))
+	mux.Handle("GET /friends", middleware.WithAuth(http.HandlerFunc(h.handleFriendsList)))
+	mux.Handle("POST /friends/request", middleware.WithAuth(http.HandlerFunc(h.handleFriendRequest)))
+	mux.Handle("POST /friends/accept", middleware.WithAuth(http.HandlerFunc(h.handleFriendAccept)))
+	mux.Handle("DELETE /friends/{id}", middleware.WithAuth(http.HandlerFunc(h.handleFriendRemove)))
 
 	httpServer := &http.Server{
 		Addr:    ":8082",
