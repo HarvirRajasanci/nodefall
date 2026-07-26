@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -15,7 +16,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	queue, err := NewQueue("localhost:9090")
+	gameAddr := os.Getenv("NODEFALL_GAME_GRPC_ADDR")
+	if gameAddr == "" {
+		gameAddr = "localhost:9090"
+	}
+
+	queue, err := NewQueue(gameAddr)
 	if err != nil {
 		log.Fatalf("connecting to game service: %v", err)
 	}
