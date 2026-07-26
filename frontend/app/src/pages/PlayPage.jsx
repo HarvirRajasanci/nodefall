@@ -7,6 +7,19 @@ const GAME_WS_URL = "ws://localhost:8081/ws";
 const PLAYER_RADIUS = 16;
 const BULLET_RADIUS = 6;
 const ITEM_RADIUS = 18;
+const TICK_MS = 50; // must match world.TickRate
+
+function lerp(a, b, t) {
+  return a + (b - a) * t;
+}
+
+function extrapolatedBullets(currState, alpha) {
+  return (currState.bullets ?? []).map((b) => ({
+    ...b,
+    x: b.x + b.vx * alpha,
+    y: b.y + b.vy * alpha,
+  }));
+}
 
 export default function PlayPage() {
   const { token, userID } = useAuth();
@@ -26,7 +39,17 @@ export default function PlayPage() {
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
 
-    let state = { players: [], bullets: [], items: [], zone: null };
+    const empty = { players: [], bullets: [], items: [], zone: null };
+
+    // Two most recent snapshots, each timestamped on arrival, so draw()
+    // can interpolate player positions (and extrapolate bullets using
+    // their known velocity) between them instead of snapping directly
+    // to each new (20Hz) server update — the server ticks at 20/sec but
+    // we render at up to 60fps, so without this, movement visibly steps.
+    let prevState = empty;
+    let currState = empty;
+    let currStateTime = performance.now();
+
     let camera = { x: 0, y: 0 };
     const input = { dx: 0, dy: 0, angle: 0, shoot: false };
     const keys = {};
@@ -40,9 +63,12 @@ export default function PlayPage() {
     ws.onclose = () => setHud("disconnected");
     ws.onerror = () => setHud("connection error");
     ws.onmessage = (event) => {
-      state = JSON.parse(event.data);
-      setMatchPhase(state.phase);
-      setCountdown(state.countdown_seconds ?? 0);
+      const next = JSON.parse(event.data);
+      prevState = currState;
+      currState = next;
+      currStateTime = performance.now();
+      setMatchPhase(next.phase);
+      setCountdown(next.countdown_seconds ?? 0);
     };
 
     function setHud(text) {
@@ -94,29 +120,49 @@ export default function PlayPage() {
       };
     }
 
+    // interpolatedPlayers blends each player's position between the
+    // previous and current snapshot based on how far through the
+    // current tick interval we are. Players not present in the
+    // previous snapshot (just joined) render at their current
+    // position directly — nothing to interpolate from yet.
+    function interpolatedPlayers(alpha) {
+      return (currState.players ?? []).map((p) => {
+        const prev = prevState.players?.find((pp) => pp.id === p.id);
+        if (!prev) return p;
+        return {
+          ...p,
+          x: lerp(prev.x, p.x, alpha),
+          y: lerp(prev.y, p.y, alpha),
+        };
+      });
+    }
+
     let animationFrameId;
 
     function draw() {
       ctx.fillStyle = "#111";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      const self = state.players?.find((p) => p.id === userID);
+      const alpha = Math.min(1, (performance.now() - currStateTime) / TICK_MS);
+      const players = interpolatedPlayers(alpha);
+
+      const self = players.find((p) => p.id === userID);
       if (self) {
         camera.x = self.x;
         camera.y = self.y;
       }
 
-      if (state.zone) {
-        const c = worldToScreen(state.zone.x, state.zone.y);
+      if (currState.zone) {
+        const c = worldToScreen(currState.zone.x, currState.zone.y);
         ctx.strokeStyle = "#4af";
         ctx.lineWidth = 3;
         ctx.beginPath();
-        ctx.arc(c.x, c.y, state.zone.radius, 0, Math.PI * 2);
+        ctx.arc(c.x, c.y, currState.zone.radius, 0, Math.PI * 2);
         ctx.stroke();
       }
 
       ctx.fillStyle = "#fc4";
-      for (const item of state.items ?? []) {
+      for (const item of currState.items ?? []) {
         const p = worldToScreen(item.x, item.y);
         ctx.beginPath();
         ctx.arc(p.x, p.y, ITEM_RADIUS, 0, Math.PI * 2);
@@ -124,14 +170,14 @@ export default function PlayPage() {
       }
 
       ctx.fillStyle = "#ff4";
-      for (const bullet of state.bullets ?? []) {
+      for (const bullet of extrapolatedBullets(currState, alpha)) {
         const p = worldToScreen(bullet.x, bullet.y);
         ctx.beginPath();
         ctx.arc(p.x, p.y, BULLET_RADIUS, 0, Math.PI * 2);
         ctx.fill();
       }
 
-      for (const player of state.players ?? []) {
+      for (const player of players) {
         if (!player.alive) continue;
         const p = worldToScreen(player.x, player.y);
 
@@ -156,11 +202,10 @@ export default function PlayPage() {
         ctx.fillRect(p.x - 20, p.y - PLAYER_RADIUS - 12, 40 * (player.hp / 100), 5);
       }
 
-      const self2 = state.players?.find((p) => p.id === userID);
-      if (self2) {
+      if (self) {
         setHud(
-          `${userID.slice(0, 8)} — HP ${self2.hp}  Armour ${self2.armour}  Gun ${self2.gun}${
-            self2.alive ? "" : "  (DEAD)"
+          `${userID.slice(0, 8)} — HP ${self.hp}  Armour ${self.armour}  Gun ${self.gun}${
+            self.alive ? "" : "  (DEAD)"
           }`
         );
       }
