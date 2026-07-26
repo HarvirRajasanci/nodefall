@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { register } from "../api/auth";
+import AuthLayout from "../components/AuthLayout";
 
 export default function RegisterPage() {
   const [username, setUsername] = useState("");
@@ -28,48 +29,58 @@ export default function RegisterPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-900">
-      <form
-        onSubmit={handleSubmit}
-        className="bg-gray-800 p-8 rounded-lg w-80 flex flex-col gap-4"
-      >
-        <h1 className="text-xl font-semibold text-gray-100">Register</h1>
+    <AuthLayout>
+      <h1 className="text-gray-100 text-lg font-medium mb-1">Create account</h1>
+      <p className="text-gray-500 text-sm mb-6">Join Nodefall</p>
 
-        <input
-          type="text"
-          placeholder="Username"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          className="bg-gray-700 text-gray-100 rounded px-3 py-2 outline-none focus:ring-2 focus:ring-blue-500"
-        />
-        <input
-          type="password"
-          placeholder="Password (min 8 characters)"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          className="bg-gray-700 text-gray-100 rounded px-3 py-2 outline-none focus:ring-2 focus:ring-blue-500"
-        />
+      <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+        <div>
+          <label className="block text-gray-400 text-xs mb-1.5">Username</label>
+          <input
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            className="w-full bg-gray-800 text-gray-100 rounded-lg px-3 py-2.5 text-sm border border-gray-700 outline-none focus:border-emerald-500 transition-colors"
+          />
+        </div>
 
-        {error && <p className="text-red-400 text-sm">{error}</p>}
+        <div>
+          <label className="block text-gray-400 text-xs mb-1.5">Password</label>
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full bg-gray-800 text-gray-100 rounded-lg px-3 py-2.5 text-sm border border-gray-700 outline-none focus:border-emerald-500 transition-colors"
+          />
+          <p className="text-gray-600 text-xs mt-1.5">At least 8 characters</p>
+        </div>
+
+        {error && (
+          <p className="text-red-400 text-xs bg-red-950/50 border border-red-900 rounded-lg px-3 py-2">
+            {error}
+          </p>
+        )}
         {success && (
-          <p className="text-green-400 text-sm">Account created — redirecting to login...</p>
+          <p className="text-emerald-400 text-xs bg-emerald-950/50 border border-emerald-900 rounded-lg px-3 py-2">
+            Account created — redirecting to login
+          </p>
         )}
 
         <button
           type="submit"
           disabled={loading}
-          className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded px-3 py-2 font-medium"
+          className="mt-2 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed text-gray-950 rounded-lg px-3 py-2.5 text-sm font-medium font-mono tracking-wide transition-colors"
         >
-          {loading ? "Creating account..." : "Register"}
+          {loading ? "CREATING ACCOUNT..." : "REGISTER"}
         </button>
-
-        <p className="text-gray-400 text-sm text-center">
-          Already have an account?{" "}
-          <Link to="/login" className="text-blue-400 hover:underline">
-            Log in
-          </Link>
-        </p>
       </form>
-    </div>
+
+      <p className="text-gray-500 text-sm text-center mt-6">
+        Already have an account?{" "}
+        <Link to="/login" className="text-emerald-400 hover:text-emerald-300">
+          Log in
+        </Link>
+      </p>
+    </AuthLayout>
   );
 }

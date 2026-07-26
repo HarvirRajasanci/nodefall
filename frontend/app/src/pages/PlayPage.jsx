@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Navigate, Link } from "react-router-dom";
 import { useAuth } from "../AuthContext";
 
@@ -12,6 +12,9 @@ export default function PlayPage() {
   const { token, userID } = useAuth();
   const canvasRef = useRef(null);
   const hudRef = useRef(null);
+
+  const [phase, setPhase] = useState("connecting"); // connecting | countdown | live
+  const [count, setCount] = useState(3);
 
   useEffect(() => {
     if (!token) return;
@@ -29,7 +32,10 @@ export default function PlayPage() {
 
     const ws = new WebSocket(`${GAME_WS_URL}?token=${encodeURIComponent(token)}`);
 
-    ws.onopen = () => setHud(`connected as ${userID?.slice(0, 8)}`);
+    ws.onopen = () => {
+      setHud(`connected as ${userID?.slice(0, 8)}`);
+      setPhase("countdown");
+    };
     ws.onclose = () => setHud("disconnected");
     ws.onerror = () => setHud("connection error");
     ws.onmessage = (event) => {
@@ -161,9 +167,6 @@ export default function PlayPage() {
 
     animationFrameId = requestAnimationFrame(draw);
 
-    // Cleanup: runs when this component unmounts (navigating away from
-    // /play) — critical to avoid leaking an open WebSocket, a running
-    // animation loop, and stale event listeners after the user leaves.
     return () => {
       cancelAnimationFrame(animationFrameId);
       clearInterval(inputInterval);
@@ -177,6 +180,21 @@ export default function PlayPage() {
     };
   }, [token, userID]);
 
+  // Countdown ticks down once the WebSocket is open. Purely cosmetic —
+  // the connection and engine are already live underneath; this just
+  // delays revealing the HUD/controls hint until it finishes.
+  useEffect(() => {
+    if (phase !== "countdown") return;
+
+    if (count === 0) {
+      setPhase("live");
+      return;
+    }
+
+    const timer = setTimeout(() => setCount((c) => c - 1), 800);
+    return () => clearTimeout(timer);
+  }, [phase, count]);
+
   if (!token) {
     return <Navigate to="/login" replace />;
   }
@@ -185,7 +203,9 @@ export default function PlayPage() {
     <div className="relative">
       <div
         ref={hudRef}
-        className="fixed top-2 left-2 text-gray-100 font-mono text-sm z-10"
+        className={`fixed top-2 left-2 text-gray-100 font-mono text-sm z-10 transition-opacity ${
+          phase === "live" ? "opacity-100" : "opacity-0"
+        }`}
       >
         Not connected
       </div>
@@ -195,6 +215,32 @@ export default function PlayPage() {
       >
         ← Home
       </Link>
+
+      {phase === "connecting" && (
+        <div className="fixed inset-0 z-20 flex flex-col items-center justify-center gap-4 bg-gray-950">
+          <div className="relative w-14 h-14 flex items-center justify-center">
+            <div className="absolute inset-0 border-[1.5px] border-dashed border-emerald-500/60 rounded-full animate-[spin_1.2s_linear_infinite]" />
+            <div className="w-9 h-9 rounded-lg bg-emerald-500 flex items-center justify-center text-gray-950 font-bold text-sm font-mono">
+              N
+            </div>
+          </div>
+          <p className="text-gray-400 text-sm font-mono tracking-wide">
+            CONNECTING TO GAME SERVER...
+          </p>
+        </div>
+      )}
+
+      {phase === "countdown" && (
+        <div className="fixed inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-gray-950/90">
+          <div className="text-emerald-400 text-7xl font-mono font-bold tabular-nums">
+            {count > 0 ? count : "GO"}
+          </div>
+          <p className="text-gray-500 text-sm font-mono tracking-wide">
+            DROPPING INTO THE ZONE
+          </p>
+        </div>
+      )}
+
       <canvas ref={canvasRef} className="block bg-gray-900" />
     </div>
   );
