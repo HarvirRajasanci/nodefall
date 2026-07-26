@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Navigate, useNavigate, Link } from "react-router-dom";
-import { useAuth } from "../AuthContext";
+import { useAuth } from "../authContext";
 import { listFriends } from "../api/friends";
 
 export default function HomePage() {

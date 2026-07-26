@@ -1,31 +1,23 @@
-import { createContext, useContext, useState } from "react";
-
-const AuthContext = createContext(null);
-
-// Decodes the JWT payload client-side purely for the UI's own use
-// (knowing the logged-in user's ID) — this is never a security check;
-// the server independently re-verifies the token on every request.
-function decodeUserID(token) {
-  try {
-    const payload = token.split(".")[1];
-    const json = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
-    return JSON.parse(json).user_id;
-  } catch {
-    return null;
-  }
-}
+import { useState } from "react";
+import { AuthContext, STORAGE_KEY, decodeUserID } from "./authContext";
 
 export function AuthProvider({ children }) {
-  const [token, setToken] = useState(null);
+  // Persisted in localStorage so the user stays logged in across
+  // browser restarts, not just page refreshes. Tokens expire after
+  // 24h server-side (shared/jwt tokenTTL) regardless of how long
+  // they sit here, which bounds the risk of this choice.
+  const [token, setTokenState] = useState(() => localStorage.getItem(STORAGE_KEY));
 
   const userID = token ? decodeUserID(token) : null;
 
   function loginWithToken(newToken) {
-    setToken(newToken);
+    localStorage.setItem(STORAGE_KEY, newToken);
+    setTokenState(newToken);
   }
 
   function logout() {
-    setToken(null);
+    localStorage.removeItem(STORAGE_KEY);
+    setTokenState(null);
   }
 
   return (
@@ -33,12 +25,4 @@ export function AuthProvider({ children }) {
       {children}
     </AuthContext.Provider>
   );
-}
-
-export function useAuth() {
-  const ctx = useContext(AuthContext);
-  if (!ctx) {
-    throw new Error("useAuth must be used within an AuthProvider");
-  }
-  return ctx;
 }

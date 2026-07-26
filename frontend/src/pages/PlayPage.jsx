@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Navigate, Link } from "react-router-dom";
-import { useAuth } from "../AuthContext";
+import { useAuth } from "../authContext";
 
 const GAME_WS_URL = "ws://localhost:8081/ws";
 
