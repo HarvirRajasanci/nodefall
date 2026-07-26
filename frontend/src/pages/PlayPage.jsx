@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Navigate, Link, useSearchParams } from "react-router-dom";
 import { useAuth } from "../authContext";
 
-const GAME_WS_URL = "ws://localhost:8081/ws";
+const GAME_WS_URL = `ws://${window.location.host}/ws`;
 
 const PLAYER_RADIUS = 16;
 const BULLET_RADIUS = 6;

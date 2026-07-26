@@ -1,4 +1,4 @@
-const MATCHMAKER_URL = "http://localhost:8083";
+const MATCHMAKER_URL = "/api/matchmaker";
 
 async function authedFetch(path, token, options = {}) {
   const res = await fetch(`${MATCHMAKER_URL}${path}?token=${encodeURIComponent(token)}`, {

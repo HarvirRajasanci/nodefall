@@ -1,4 +1,4 @@
-const AUTH_URL = "http://localhost:8082";
+const AUTH_URL = "/api/auth";
 
 async function authedFetch(path, token, options = {}) {
   const res = await fetch(`${AUTH_URL}${path}?token=${encodeURIComponent(token)}`, {
