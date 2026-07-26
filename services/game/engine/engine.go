@@ -66,10 +66,16 @@ type Engine struct {
 	waitStarted time.Time // zero until the first player joins a waiting match
 	endedAt     time.Time // zero until the match ends
 	winner      string    // playerID of the winner, empty if no one won
+
+	// allowedPlayers restricts Join to a specific set of player IDs —
+	// set when a match is created for known matchmaker-assigned
+	// players. Nil means anyone may join (used by tests and any
+	// engine created without a fixed roster).
+	allowedPlayers map[string]bool
 }
 
 // New creates an engine with a fresh zone and item spawn, ready to
-// accept players. Starts in PhaseWaiting.
+// accept any player. Starts in PhaseWaiting.
 func New() *Engine {
 	return &Engine{
 		players:   make(map[string]*world.Player),
@@ -81,12 +87,31 @@ func New() *Engine {
 	}
 }
 
+// NewForPlayers creates an engine that only accepts Join calls from the
+// given player IDs — used when a match is created for a specific,
+// matchmaker-assigned roster, so a guessed or leaked match ID can't be
+// used to join someone else's match.
+func NewForPlayers(playerIDs []string) *Engine {
+	e := New()
+	e.allowedPlayers = make(map[string]bool, len(playerIDs))
+	for _, id := range playerIDs {
+		e.allowedPlayers[id] = true
+	}
+	return e
+}
+
 // Join adds a new player to the match at a random spawn position and
 // registers their client for future broadcasts. If this is the first
 // player to join a waiting match, starts the countdown to PhaseLive.
-func (e *Engine) Join(client Client) {
+// Returns false without joining if this engine has a fixed roster
+// (via NewForPlayers) and client.ID() isn't part of it.
+func (e *Engine) Join(client Client) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	if e.allowedPlayers != nil && !e.allowedPlayers[client.ID()] {
+		return false
+	}
 
 	if e.phase == PhaseWaiting && len(e.players) == 0 && e.waitStarted.IsZero() {
 		e.waitStarted = time.Now()
@@ -95,6 +120,7 @@ func (e *Engine) Join(client Client) {
 	x, y := randomSpawn()
 	e.players[client.ID()] = world.NewPlayer(client.ID(), x, y)
 	e.clients[client.ID()] = client
+	return true
 }
 
 // Leave removes a player and their client from the match.
@@ -105,6 +131,15 @@ func (e *Engine) Leave(client Client) {
 	delete(e.players, client.ID())
 	delete(e.clients, client.ID())
 	delete(e.respawnAt, client.ID())
+}
+
+// PlayerCount returns the number of currently connected players —
+// used by the match manager to decide when a match is idle and safe
+// to clean up.
+func (e *Engine) PlayerCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return len(e.players)
 }
 
 // HandleInput applies one decoded player action: movement, aim angle,

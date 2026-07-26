@@ -440,3 +440,31 @@ func TestResetMatch_GivesFreshZoneAndItems(t *testing.T) {
 		t.Errorf("got %d items, want %d", len(e.items), world.ItemCount)
 	}
 }
+
+func TestNewForPlayers_AllowsListedPlayer(t *testing.T) {
+	e := NewForPlayers([]string{"player-1", "player-2"})
+	client := &fakeClient{id: "player-1"}
+
+	ok := e.Join(client)
+
+	if !ok {
+		t.Error("got false, want true — player-1 is in the allowed list")
+	}
+	if _, exists := e.players["player-1"]; !exists {
+		t.Error("player-1 was not actually added despite ok=true")
+	}
+}
+
+func TestNewForPlayers_RejectsUnlistedPlayer(t *testing.T) {
+	e := NewForPlayers([]string{"player-1", "player-2"})
+	client := &fakeClient{id: "stranger"}
+
+	ok := e.Join(client)
+
+	if ok {
+		t.Error("got true, want false — stranger is not in the allowed list")
+	}
+	if _, exists := e.players["stranger"]; exists {
+		t.Error("stranger was added despite not being in the allowed list")
+	}
+}
