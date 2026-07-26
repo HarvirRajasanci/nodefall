@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Navigate, Link } from "react-router-dom";
+import { Navigate, Link, useSearchParams } from "react-router-dom";
 import { useAuth } from "../authContext";
 
 const GAME_WS_URL = "ws://localhost:8081/ws";
@@ -23,6 +23,8 @@ function extrapolatedBullets(currState, alpha) {
 
 export default function PlayPage() {
   const { token, userID } = useAuth();
+  const [searchParams] = useSearchParams();
+  const matchID = searchParams.get("match");
   const canvasRef = useRef(null);
   const hudRef = useRef(null);
 
@@ -32,7 +34,7 @@ export default function PlayPage() {
   const [winner, setWinner] = useState("");
 
   useEffect(() => {
-    if (!token) return;
+    if (!token || !matchID) return;
 
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
@@ -41,12 +43,6 @@ export default function PlayPage() {
     canvas.height = window.innerHeight;
 
     const empty = { players: [], bullets: [], items: [], zone: null };
-
-    // Two most recent snapshots, each timestamped on arrival, so draw()
-    // can interpolate player positions (and extrapolate bullets using
-    // their known velocity) between them instead of snapping directly
-    // to each new (20Hz) server update — the server ticks at 20/sec but
-    // we render at up to 60fps, so without this, movement visibly steps.
     let prevState = empty;
     let currState = empty;
     let currStateTime = performance.now();
@@ -55,7 +51,9 @@ export default function PlayPage() {
     const input = { dx: 0, dy: 0, angle: 0, shoot: false };
     const keys = {};
 
-    const ws = new WebSocket(`${GAME_WS_URL}?token=${encodeURIComponent(token)}`);
+    const ws = new WebSocket(
+      `${GAME_WS_URL}?match=${encodeURIComponent(matchID)}&token=${encodeURIComponent(token)}`
+    );
 
     ws.onopen = () => {
       setHud(`connected as ${userID?.slice(0, 8)}`);
@@ -122,11 +120,6 @@ export default function PlayPage() {
       };
     }
 
-    // interpolatedPlayers blends each player's position between the
-    // previous and current snapshot based on how far through the
-    // current tick interval we are. Players not present in the
-    // previous snapshot (just joined) render at their current
-    // position directly — nothing to interpolate from yet.
     function interpolatedPlayers(alpha) {
       return (currState.players ?? []).map((p) => {
         const prev = prevState.players?.find((pp) => pp.id === p.id);
@@ -228,10 +221,13 @@ export default function PlayPage() {
       canvas.removeEventListener("mouseup", handleMouseUp);
       window.removeEventListener("resize", handleResize);
     };
-  }, [token, userID]);
+  }, [token, userID, matchID]);
 
   if (!token) {
     return <Navigate to="/login" replace />;
+  }
+  if (!matchID) {
+    return <Navigate to="/" replace />;
   }
 
   const showOverlay =

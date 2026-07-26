@@ -20,7 +20,7 @@ export default function HomePage() {
         setFriends(data.friends ?? []);
         setPendingCount((data.pending ?? []).length);
       })
-      .catch(() => {}); // silent — friends summary is non-critical on Home
+      .catch(() => {});
 
     return () => {
       ignore = true;
@@ -55,7 +55,7 @@ export default function HomePage() {
 
       <div className="flex flex-col gap-3 w-64">
         <button
-          onClick={() => navigate("/play")}
+          onClick={() => navigate("/queue")}
           className="bg-emerald-500 hover:bg-emerald-400 text-gray-950 rounded-lg px-4 py-3 text-sm font-medium font-mono tracking-wide transition-colors"
         >
           PLAY NOW
