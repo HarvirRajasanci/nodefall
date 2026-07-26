@@ -13,8 +13,9 @@ export default function PlayPage() {
   const canvasRef = useRef(null);
   const hudRef = useRef(null);
 
-  const [phase, setPhase] = useState("connecting"); // connecting | countdown | live
-  const [count, setCount] = useState(3);
+  const [connectionPhase, setConnectionPhase] = useState("connecting");
+  const [matchPhase, setMatchPhase] = useState("waiting");
+  const [countdown, setCountdown] = useState(0);
 
   useEffect(() => {
     if (!token) return;
@@ -34,12 +35,14 @@ export default function PlayPage() {
 
     ws.onopen = () => {
       setHud(`connected as ${userID?.slice(0, 8)}`);
-      setPhase("countdown");
+      setConnectionPhase("connected");
     };
     ws.onclose = () => setHud("disconnected");
     ws.onerror = () => setHud("connection error");
     ws.onmessage = (event) => {
       state = JSON.parse(event.data);
+      setMatchPhase(state.phase);
+      setCountdown(state.countdown_seconds ?? 0);
     };
 
     function setHud(text) {
@@ -180,31 +183,18 @@ export default function PlayPage() {
     };
   }, [token, userID]);
 
-  // Countdown ticks down once the WebSocket is open. Purely cosmetic —
-  // the connection and engine are already live underneath; this just
-  // delays revealing the HUD/controls hint until it finishes.
-  useEffect(() => {
-    if (phase !== "countdown") return;
-
-    if (count === 0) {
-      setPhase("live");
-      return;
-    }
-
-    const timer = setTimeout(() => setCount((c) => c - 1), 800);
-    return () => clearTimeout(timer);
-  }, [phase, count]);
-
   if (!token) {
     return <Navigate to="/login" replace />;
   }
+
+  const showOverlay = connectionPhase === "connecting" || matchPhase === "waiting";
 
   return (
     <div className="relative">
       <div
         ref={hudRef}
         className={`fixed top-2 left-2 text-gray-100 font-mono text-sm z-10 transition-opacity ${
-          phase === "live" ? "opacity-100" : "opacity-0"
+          showOverlay ? "opacity-0" : "opacity-100"
         }`}
       >
         Not connected
@@ -216,7 +206,7 @@ export default function PlayPage() {
         ← Home
       </Link>
 
-      {phase === "connecting" && (
+      {connectionPhase === "connecting" && (
         <div className="fixed inset-0 z-20 flex flex-col items-center justify-center gap-4 bg-gray-950">
           <div className="relative w-14 h-14 flex items-center justify-center">
             <div className="absolute inset-0 border-[1.5px] border-dashed border-emerald-500/60 rounded-full animate-[spin_1.2s_linear_infinite]" />
@@ -230,13 +220,13 @@ export default function PlayPage() {
         </div>
       )}
 
-      {phase === "countdown" && (
+      {connectionPhase === "connected" && matchPhase === "waiting" && (
         <div className="fixed inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-gray-950/90">
           <div className="text-emerald-400 text-7xl font-mono font-bold tabular-nums">
-            {count > 0 ? count : "GO"}
+            {countdown > 0 ? countdown : "GO"}
           </div>
           <p className="text-gray-500 text-sm font-mono tracking-wide">
-            DROPPING INTO THE ZONE
+            MATCH STARTING
           </p>
         </div>
       )}

@@ -18,6 +18,13 @@ type fakeClient struct {
 func (f *fakeClient) ID() string      { return f.id }
 func (f *fakeClient) Send(msg []byte) { f.msgs = append(f.msgs, msg) }
 
+// makeLive bypasses the real MatchStartDelay wait so tests that need
+// immediate simulation don't have to sleep for real time. Same
+// direct-field-access pattern used elsewhere in this package's tests.
+func makeLive(e *Engine) {
+	e.phase = PhaseLive
+}
+
 func TestNew_CreatesEngineWithItemsAndZone(t *testing.T) {
 	e := New()
 
@@ -26,6 +33,9 @@ func TestNew_CreatesEngineWithItemsAndZone(t *testing.T) {
 	}
 	if e.zone == nil {
 		t.Error("got nil zone, want initialized zone")
+	}
+	if e.phase != PhaseWaiting {
+		t.Errorf("got phase %v, want %v", e.phase, PhaseWaiting)
 	}
 }
 
@@ -40,6 +50,29 @@ func TestJoin_AddsPlayerAndClient(t *testing.T) {
 	}
 	if _, ok := e.clients["player-1"]; !ok {
 		t.Error("client was not registered after Join")
+	}
+}
+
+func TestJoin_StartsWaitTimerOnFirstPlayer(t *testing.T) {
+	e := New()
+	client := &fakeClient{id: "player-1"}
+
+	e.Join(client)
+
+	if e.waitStarted.IsZero() {
+		t.Error("waitStarted was not set after first player joined")
+	}
+}
+
+func TestJoin_DoesNotResetWaitTimerForLateJoiners(t *testing.T) {
+	e := New()
+	e.Join(&fakeClient{id: "player-1"})
+	first := e.waitStarted
+
+	e.Join(&fakeClient{id: "player-2"})
+
+	if e.waitStarted != first {
+		t.Error("waitStarted was reset by a second player joining, want unchanged")
 	}
 }
 
@@ -58,10 +91,48 @@ func TestLeave_RemovesPlayerAndClient(t *testing.T) {
 	}
 }
 
+func TestTick_TransitionsToLiveAfterMatchStartDelay(t *testing.T) {
+	e := New()
+	e.Join(&fakeClient{id: "player-1"})
+	e.waitStarted = time.Now().Add(-world.MatchStartDelay - time.Second)
+
+	e.Tick()
+
+	if e.phase != PhaseLive {
+		t.Errorf("got phase %v, want %v", e.phase, PhaseLive)
+	}
+}
+
+func TestTick_StaysWaitingBeforeMatchStartDelay(t *testing.T) {
+	e := New()
+	e.Join(&fakeClient{id: "player-1"})
+	e.waitStarted = time.Now()
+
+	e.Tick()
+
+	if e.phase != PhaseWaiting {
+		t.Errorf("got phase %v, want %v", e.phase, PhaseWaiting)
+	}
+}
+
+func TestHandleInput_IgnoredWhileWaiting(t *testing.T) {
+	e := New()
+	client := &fakeClient{id: "player-1"}
+	e.Join(client)
+	startX := e.players["player-1"].X
+
+	e.HandleInput(client, Input{DX: 1, DY: 0})
+
+	if e.players["player-1"].X != startX {
+		t.Error("player moved during PhaseWaiting, want no effect")
+	}
+}
+
 func TestHandleInput_MovesAlivePlayer(t *testing.T) {
 	e := New()
 	client := &fakeClient{id: "player-1"}
 	e.Join(client)
+	makeLive(e)
 	startX := e.players["player-1"].X
 
 	e.HandleInput(client, Input{DX: 1, DY: 0})
@@ -73,9 +144,9 @@ func TestHandleInput_MovesAlivePlayer(t *testing.T) {
 
 func TestHandleInput_IgnoresUnknownClient(t *testing.T) {
 	e := New()
+	makeLive(e)
 	unknown := &fakeClient{id: "ghost"}
 
-	// Should not panic and should have no effect.
 	e.HandleInput(unknown, Input{DX: 1, DY: 0})
 
 	if len(e.players) != 0 {
@@ -87,6 +158,7 @@ func TestHandleInput_IgnoresDeadPlayer(t *testing.T) {
 	e := New()
 	client := &fakeClient{id: "player-1"}
 	e.Join(client)
+	makeLive(e)
 	e.players["player-1"].Alive = false
 	startX := e.players["player-1"].X
 
@@ -101,6 +173,7 @@ func TestHandleInput_ShootingCreatesBullet(t *testing.T) {
 	e := New()
 	client := &fakeClient{id: "player-1"}
 	e.Join(client)
+	makeLive(e)
 
 	e.HandleInput(client, Input{Shoot: true})
 
@@ -116,9 +189,10 @@ func TestHandleInput_ShootingRespectsFireRate(t *testing.T) {
 	e := New()
 	client := &fakeClient{id: "player-1"}
 	e.Join(client)
+	makeLive(e)
 
 	e.HandleInput(client, Input{Shoot: true})
-	e.HandleInput(client, Input{Shoot: true}) // immediately again, too soon
+	e.HandleInput(client, Input{Shoot: true})
 
 	if len(e.bullets) != 1 {
 		t.Errorf("got %d bullets, want 1 — second shot should be blocked by FireRate", len(e.bullets))
@@ -129,14 +203,12 @@ func TestTick_BulletMovesAndCanExpire(t *testing.T) {
 	e := New()
 	client := &fakeClient{id: "player-1"}
 	e.Join(client)
+	makeLive(e)
 	e.HandleInput(client, Input{Shoot: true})
 	startX := e.bullets[0].X
 
 	e.Tick()
 
-	// The bullet may have already hit something and been removed, or
-	// still be flying — either way, it must have moved from its start
-	// position if it's still present.
 	if len(e.bullets) == 1 && e.bullets[0].X == startX {
 		t.Error("bullet did not move after Tick")
 	}
@@ -148,12 +220,12 @@ func TestTick_BulletHitsAndDamagesPlayer(t *testing.T) {
 	target := &fakeClient{id: "target"}
 	e.Join(attacker)
 	e.Join(target)
+	makeLive(e)
 
 	e.players["attacker"].X, e.players["attacker"].Y = 100, 100
 	e.players["target"].X, e.players["target"].Y = 100, 300
 	startHP := e.players["target"].HP
 
-	// Angle pointing straight down (positive Y) toward the target.
 	e.HandleInput(attacker, Input{Angle: math.Pi / 2, Shoot: true})
 
 	for i := 0; i < 30 && e.players["target"].HP == startHP; i++ {
@@ -169,6 +241,7 @@ func TestCheckBulletCollisions_LethalHitSchedulesRespawn(t *testing.T) {
 	e := New()
 	client := &fakeClient{id: "player-1"}
 	e.Join(client)
+	makeLive(e)
 	e.players["player-1"].X, e.players["player-1"].Y = 500, 500
 
 	lethal := world.NewBullet("someone-else", 500, 500, 0, 9999)
@@ -188,8 +261,9 @@ func TestProcessRespawns_RevivesPlayerAfterDelayElapses(t *testing.T) {
 	e := New()
 	client := &fakeClient{id: "player-1"}
 	e.Join(client)
+	makeLive(e)
 	e.players["player-1"].Alive = false
-	e.respawnAt["player-1"] = time.Now().Add(-time.Second) // already due
+	e.respawnAt["player-1"] = time.Now().Add(-time.Second)
 
 	e.processRespawns()
 
@@ -205,8 +279,9 @@ func TestProcessRespawns_DoesNothingBeforeDelayElapses(t *testing.T) {
 	e := New()
 	client := &fakeClient{id: "player-1"}
 	e.Join(client)
+	makeLive(e)
 	e.players["player-1"].Alive = false
-	e.respawnAt["player-1"] = time.Now().Add(time.Hour) // far in the future
+	e.respawnAt["player-1"] = time.Now().Add(time.Hour)
 
 	e.processRespawns()
 
@@ -219,6 +294,7 @@ func TestCheckItemPickups_AppliesEffectAndRemovesItem(t *testing.T) {
 	e := New()
 	client := &fakeClient{id: "player-1"}
 	e.Join(client)
+	makeLive(e)
 	e.players["player-1"].X, e.players["player-1"].Y = 700, 700
 	e.players["player-1"].Armour = 0
 

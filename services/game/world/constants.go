@@ -36,6 +36,9 @@ const (
 	FireRate     = 300 * time.Millisecond
 	BulletDamage = 20
 
+	// Match lifecycle
+	MatchStartDelay = 3 * time.Second
+
 	// Game loop
 	TickRate     = 50 * time.Millisecond // 20 ticks/sec
 	RespawnDelay = 5 * time.Second

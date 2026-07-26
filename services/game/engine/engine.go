@@ -28,12 +28,23 @@ type Input struct {
 	Shoot bool    `json:"shoot"`
 }
 
+// Phase describes whether the match is still waiting for players
+// (no simulation runs, no input is applied) or live.
+type Phase string
+
+const (
+	PhaseWaiting Phase = "waiting"
+	PhaseLive    Phase = "live"
+)
+
 // Snapshot is the per-tick state broadcast to every connected client.
 type Snapshot struct {
-	Players []*world.Player `json:"players"`
-	Bullets []*world.Bullet `json:"bullets"`
-	Items   []*world.Item   `json:"items"`
-	Zone    *world.Zone     `json:"zone"`
+	Phase            Phase           `json:"phase"`
+	CountdownSeconds int             `json:"countdown_seconds"`
+	Players          []*world.Player `json:"players"`
+	Bullets          []*world.Bullet `json:"bullets"`
+	Items            []*world.Item   `json:"items"`
+	Zone             *world.Zone     `json:"zone"`
 }
 
 // Engine holds the live state for a single match and advances it one
@@ -49,10 +60,15 @@ type Engine struct {
 	zone    *world.Zone
 
 	respawnAt map[string]time.Time // playerID -> when they respawn
+
+	phase       Phase
+	waitStarted time.Time // zero until the first player joins
 }
 
 // New creates an engine with a fresh zone and item spawn, ready to
-// accept players.
+// accept players. Starts in PhaseWaiting — no simulation runs and no
+// input is applied until enough real time has passed after the first
+// player joins (world.MatchStartDelay).
 func New() *Engine {
 	return &Engine{
 		players:   make(map[string]*world.Player),
@@ -60,14 +76,20 @@ func New() *Engine {
 		items:     world.SpawnItems(world.ItemCount),
 		zone:      world.NewZone(),
 		respawnAt: make(map[string]time.Time),
+		phase:     PhaseWaiting,
 	}
 }
 
 // Join adds a new player to the match at a random spawn position and
-// registers their client for future broadcasts.
+// registers their client for future broadcasts. If this is the first
+// player to join a waiting match, starts the countdown to PhaseLive.
 func (e *Engine) Join(client Client) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	if e.phase == PhaseWaiting && len(e.players) == 0 && e.waitStarted.IsZero() {
+		e.waitStarted = time.Now()
+	}
 
 	x, y := randomSpawn()
 	e.players[client.ID()] = world.NewPlayer(client.ID(), x, y)
@@ -85,11 +107,15 @@ func (e *Engine) Leave(client Client) {
 }
 
 // HandleInput applies one decoded player action: movement, aim angle,
-// and an optional shot. Ignored if the client is unknown or the player
-// is currently dead.
+// and an optional shot. Ignored if the client is unknown, the player
+// is currently dead, or the match hasn't gone live yet.
 func (e *Engine) HandleInput(client Client, input Input) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	if e.phase != PhaseLive {
+		return
+	}
 
 	player, ok := e.players[client.ID()]
 	if !ok || !player.Alive {
@@ -121,11 +147,21 @@ func (e *Engine) Run(ctx context.Context) {
 	}
 }
 
-// Tick advances the match by one fixed timestep. Exported so tests can
+// Tick advances the match by one fixed timestep. While PhaseWaiting,
+// only the phase transition and broadcast happen — no bullets move,
+// no zone damage applies, no respawns process. Exported so tests can
 // drive the engine tick-by-tick without waiting on a real ticker.
 func (e *Engine) Tick() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	if e.phase == PhaseWaiting {
+		if !e.waitStarted.IsZero() && time.Since(e.waitStarted) >= world.MatchStartDelay {
+			e.phase = PhaseLive
+		}
+		e.broadcast()
+		return
+	}
 
 	e.moveBullets()
 	e.checkBulletCollisions()
@@ -228,11 +264,23 @@ func (e *Engine) snapshot() Snapshot {
 	for _, p := range e.players {
 		players = append(players, p)
 	}
+
+	countdown := 0
+	if e.phase == PhaseWaiting && !e.waitStarted.IsZero() {
+		remaining := world.MatchStartDelay - time.Since(e.waitStarted)
+		if remaining < 0 {
+			remaining = 0
+		}
+		countdown = int(remaining/time.Second) + 1
+	}
+
 	return Snapshot{
-		Players: players,
-		Bullets: e.bullets,
-		Items:   e.items,
-		Zone:    e.zone,
+		Phase:            e.phase,
+		CountdownSeconds: countdown,
+		Players:          players,
+		Bullets:          e.bullets,
+		Items:            e.items,
+		Zone:             e.zone,
 	}
 }
 
