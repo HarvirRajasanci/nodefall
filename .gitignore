@@ -37,3 +37,6 @@ redis-data/
 
 # OS
 Thumbs.db
+/matchmaker
+/game
+/auth
