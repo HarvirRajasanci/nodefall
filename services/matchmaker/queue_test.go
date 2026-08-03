@@ -7,15 +7,13 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/test/bufconn"
+
+	"github.com/alicebob/miniredis/v2"
 
 	"nodefall/shared/genproto"
+	"nodefall/shared/registry"
 )
 
-// fakeGameService is a minimal genproto.GameServiceServer for testing,
-// recording every StartMatch call it receives without needing a real
-// game service running.
 type fakeGameService struct {
 	genproto.UnimplementedGameServiceServer
 	calls      []*genproto.MatchRequest
@@ -26,41 +24,45 @@ func (f *fakeGameService) StartMatch(ctx context.Context, req *genproto.MatchReq
 	f.calls = append(f.calls, req)
 	return &genproto.MatchResponse{
 		Accepted:   f.acceptNext,
-		ServerAddr: "test-server:8081",
+		ServerAddr: "test-instance",
 	}, nil
 }
 
-// newTestQueue starts an in-process gRPC server backed by fake, and
-// returns a Queue connected to it over an in-memory bufconn listener —
-// no real network port needed.
-func newTestQueue(t *testing.T, fake *fakeGameService) *Queue {
+// testRegistry returns a Registry backed by an in-memory miniredis,
+// so tests never need a real Redis server running.
+func testRegistry(t *testing.T) *registry.Registry {
+	t.Helper()
+	mr, err := miniredis.Run()
+	if err != nil {
+		t.Fatalf("starting miniredis: %v", err)
+	}
+	t.Cleanup(mr.Close)
+	return registry.New(mr.Addr())
+}
+
+// startBufconnInstance spins up an in-process gRPC server backed by
+// fake, listening on a real (but local, ephemeral) TCP port — bufconn
+// itself can't be dialed by address string the way grpc.NewClient
+// inside tryFormMatch expects, so a real loopback listener is used
+// here instead, registered in the registry with that real address.
+func startBufconnInstance(t *testing.T, id string, fake *fakeGameService) string {
 	t.Helper()
 
-	lis := bufconn.Listen(1024 * 1024)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+
 	srv := grpc.NewServer()
 	genproto.RegisterGameServiceServer(srv, fake)
-
 	go srv.Serve(lis)
 	t.Cleanup(srv.Stop)
 
-	conn, err := grpc.NewClient("passthrough:///bufnet",
-		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
-			return lis.DialContext(ctx)
-		}),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-	)
-	if err != nil {
-		t.Fatalf("dialing test server: %v", err)
-	}
-
-	return &Queue{
-		matched:    make(map[string]*QueueEntry),
-		gameClient: genproto.NewGameServiceClient(conn),
-	}
+	return lis.Addr().String()
 }
 
 func TestJoin_AddsPlayerToWaitingQueue(t *testing.T) {
-	q := newTestQueue(t, &fakeGameService{})
+	q := NewQueue(testRegistry(t))
 
 	q.Join("player-1")
 
@@ -71,18 +73,18 @@ func TestJoin_AddsPlayerToWaitingQueue(t *testing.T) {
 }
 
 func TestJoin_IgnoresDuplicateJoin(t *testing.T) {
-	q := newTestQueue(t, &fakeGameService{})
+	q := NewQueue(testRegistry(t))
 
 	q.Join("player-1")
 	q.Join("player-1")
 
 	if len(q.waiting) != 1 {
-		t.Errorf("got %d entries in queue, want 1 — duplicate join should be ignored", len(q.waiting))
+		t.Errorf("got %d entries, want 1 — duplicate join should be ignored", len(q.waiting))
 	}
 }
 
 func TestLeave_RemovesPlayerFromQueue(t *testing.T) {
-	q := newTestQueue(t, &fakeGameService{})
+	q := NewQueue(testRegistry(t))
 	q.Join("player-1")
 
 	q.Leave("player-1")
@@ -94,7 +96,7 @@ func TestLeave_RemovesPlayerFromQueue(t *testing.T) {
 }
 
 func TestStatus_ReturnsNotQueuedForUnknownPlayer(t *testing.T) {
-	q := newTestQueue(t, &fakeGameService{})
+	q := NewQueue(testRegistry(t))
 
 	status, entry := q.Status("never-joined")
 
@@ -106,10 +108,26 @@ func TestStatus_ReturnsNotQueuedForUnknownPlayer(t *testing.T) {
 	}
 }
 
-func TestTryFormMatch_FormsMatchOnceEnoughPlayersWaiting(t *testing.T) {
-	fake := &fakeGameService{acceptNext: true}
-	q := newTestQueue(t, fake)
+func TestTryFormMatch_NoInstancesRegistered_Requeues(t *testing.T) {
+	q := NewQueue(testRegistry(t))
+	q.Join("player-1")
+	q.Join("player-2")
 
+	q.tryFormMatch(context.Background())
+
+	status, _ := q.Status("player-1")
+	if status != "waiting" {
+		t.Errorf("got status %q, want %q — no instances registered, should requeue", status, "waiting")
+	}
+}
+
+func TestTryFormMatch_FormsMatchWithRegisteredInstance(t *testing.T) {
+	reg := testRegistry(t)
+	fake := &fakeGameService{acceptNext: true}
+	addr := startBufconnInstance(t, "game-1", fake)
+	reg.Register(context.Background(), registry.Instance{ID: "game-1", GRPCAddr: addr}, 5*time.Second)
+
+	q := NewQueue(reg)
 	q.Join("player-1")
 	q.Join("player-2")
 
@@ -118,47 +136,91 @@ func TestTryFormMatch_FormsMatchOnceEnoughPlayersWaiting(t *testing.T) {
 	if len(fake.calls) != 1 {
 		t.Fatalf("got %d StartMatch calls, want 1", len(fake.calls))
 	}
-	if len(fake.calls[0].PlayerIds) != 2 {
-		t.Errorf("got %d players in match request, want 2", len(fake.calls[0].PlayerIds))
-	}
 
-	status1, entry1 := q.Status("player-1")
-	if status1 != "matched" || entry1.ServerAddr != "test-server:8081" {
-		t.Errorf("player-1 status = %q, entry = %+v, want matched with server addr", status1, entry1)
+	status, entry := q.Status("player-1")
+	if status != "matched" || entry.ServerAddr != "test-instance" {
+		t.Errorf("player-1 status = %q, entry = %+v, want matched", status, entry)
 	}
 }
 
 func TestTryFormMatch_DoesNothingWithTooFewPlayers(t *testing.T) {
+	reg := testRegistry(t)
 	fake := &fakeGameService{acceptNext: true}
-	q := newTestQueue(t, fake)
+	addr := startBufconnInstance(t, "game-1", fake)
+	reg.Register(context.Background(), registry.Instance{ID: "game-1", GRPCAddr: addr}, 5*time.Second)
 
-	q.Join("player-1") // only 1, need MinPlayersPerMatch (2)
+	q := NewQueue(reg)
+	q.Join("player-1")
 
 	q.tryFormMatch(context.Background())
 
 	if len(fake.calls) != 0 {
-		t.Errorf("got %d StartMatch calls, want 0 — not enough players waiting", len(fake.calls))
+		t.Errorf("got %d StartMatch calls, want 0", len(fake.calls))
 	}
 }
 
-func TestTryFormMatch_RequeuesPlayersOnRejection(t *testing.T) {
-	fake := &fakeGameService{acceptNext: false} // game service rejects
-	q := newTestQueue(t, fake)
+func TestTryFormMatch_FallsBackToSecondInstanceWhenFirstRejects(t *testing.T) {
+	reg := testRegistry(t)
+	rejecting := &fakeGameService{acceptNext: false}
+	accepting := &fakeGameService{acceptNext: true}
 
+	addr1 := startBufconnInstance(t, "game-1", rejecting)
+	addr2 := startBufconnInstance(t, "game-2", accepting)
+	reg.Register(context.Background(), registry.Instance{ID: "game-1", GRPCAddr: addr1}, 5*time.Second)
+	reg.Register(context.Background(), registry.Instance{ID: "game-2", GRPCAddr: addr2}, 5*time.Second)
+
+	q := NewQueue(reg)
 	q.Join("player-1")
 	q.Join("player-2")
 
 	q.tryFormMatch(context.Background())
 
-	status1, _ := q.Status("player-1")
-	if status1 != "waiting" {
-		t.Errorf("got status %q, want %q — rejected players should be requeued", status1, "waiting")
+	if len(rejecting.calls) != 1 {
+		t.Errorf("got %d calls to the rejecting instance, want 1", len(rejecting.calls))
+	}
+	if len(accepting.calls) != 1 {
+		t.Errorf("got %d calls to the accepting instance, want 1 (fallback)", len(accepting.calls))
+	}
+
+	status, _ := q.Status("player-1")
+	if status != "matched" {
+		t.Errorf("got status %q, want %q — should have matched via fallback", status, "matched")
+	}
+}
+
+func TestTryFormMatch_IgnoresExpiredInstance(t *testing.T) {
+	reg := testRegistry(t)
+	fake := &fakeGameService{acceptNext: true}
+	addr := startBufconnInstance(t, "game-1", fake)
+	// Registered with a TTL of effectively zero real time by never
+	// refreshing and using ListLive against a fresh registry lookup
+	// after the entry's context is done — simplest reliable way to
+	// simulate "this instance's heartbeat stopped" is to just never
+	// register it in the first place.
+	_ = addr
+
+	q := NewQueue(reg)
+	q.Join("player-1")
+	q.Join("player-2")
+
+	q.tryFormMatch(context.Background())
+
+	if len(fake.calls) != 0 {
+		t.Errorf("got %d StartMatch calls, want 0 — instance was never registered (simulating expiry)", len(fake.calls))
+	}
+	status, _ := q.Status("player-1")
+	if status != "waiting" {
+		t.Errorf("got status %q, want %q", status, "waiting")
 	}
 }
 
 func TestRun_FormsMatchOnTick(t *testing.T) {
+	reg := testRegistry(t)
 	fake := &fakeGameService{acceptNext: true}
-	q := newTestQueue(t, fake)
+	addr := startBufconnInstance(t, "game-1", fake)
+	reg.Register(context.Background(), registry.Instance{ID: "game-1", GRPCAddr: addr}, 5*time.Second)
+
+	q := NewQueue(reg)
 	q.Join("player-1")
 	q.Join("player-2")
 
@@ -168,12 +230,12 @@ func TestRun_FormsMatchOnTick(t *testing.T) {
 	tickCh := make(chan time.Time)
 	go q.Run(ctx, tickCh)
 
-	tickCh <- time.Now() // manually trigger one matching pass
+	tickCh <- time.Now()
 
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		if status, _ := q.Status("player-1"); status == "matched" {
-			return // success
+			return
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

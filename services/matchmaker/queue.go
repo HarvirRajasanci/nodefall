@@ -12,49 +12,40 @@ import (
 	"github.com/google/uuid"
 
 	"nodefall/shared/genproto"
+	"nodefall/shared/registry"
 )
 
-// MinPlayersPerMatch is how many queued players are needed before a
-// match is formed. Kept small and unexported here rather than in
-// shared/config, since it's specific to matchmaker's own logic, not
-// something other services need to know about.
 const MinPlayersPerMatch = 2
+const startMatchTimeout = 2 * time.Second
 
-// QueueEntry tracks one player waiting for a match, and — once a match
-// is found — the details they need to connect.
 type QueueEntry struct {
 	PlayerID   string
-	MatchID    string // empty until matched
-	ServerAddr string // empty until matched
+	MatchID    string
+	ServerAddr string
 }
 
 // Queue holds players waiting for a match and periodically groups them
-// together, calling the game service's StartMatch over gRPC once
-// enough are waiting.
+// together, discovering currently-live game instances from a Redis-
+// backed registry.Registry on every matching pass and trying each in
+// order until one accepts the match — so newly-started instances are
+// picked up automatically, and instances that have crashed (missed
+// their heartbeat and expired from the registry) are never selected
+// at all, with no explicit failure-detection code needed here.
 type Queue struct {
-	mu      sync.Mutex
-	waiting []string               // player IDs waiting, in join order
-	matched map[string]*QueueEntry // playerID -> match details, once formed
-
-	gameClient genproto.GameServiceClient
+	mu       sync.Mutex
+	waiting  []string
+	matched  map[string]*QueueEntry
+	registry *registry.Registry
 }
 
-// NewQueue dials the game service's gRPC address and returns a Queue
-// ready to use.
-func NewQueue(gameGRPCAddr string) (*Queue, error) {
-	conn, err := grpc.NewClient(gameGRPCAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return nil, err
-	}
-
+// NewQueue creates a Queue that discovers game instances via reg.
+func NewQueue(reg *registry.Registry) *Queue {
 	return &Queue{
-		matched:    make(map[string]*QueueEntry),
-		gameClient: genproto.NewGameServiceClient(conn),
-	}, nil
+		matched:  make(map[string]*QueueEntry),
+		registry: reg,
+	}
 }
 
-// Join adds playerID to the waiting queue, unless they're already
-// waiting or already matched.
 func (q *Queue) Join(playerID string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -71,9 +62,6 @@ func (q *Queue) Join(playerID string) {
 	q.waiting = append(q.waiting, playerID)
 }
 
-// Leave removes playerID from the waiting queue. Has no effect if
-// they've already been matched — once a match is formed, leaving the
-// queue doesn't cancel it.
 func (q *Queue) Leave(playerID string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -86,9 +74,6 @@ func (q *Queue) Leave(playerID string) {
 	}
 }
 
-// Status returns playerID's current queue state: "waiting" if still
-// in the queue, "matched" with match details if a match has been
-// formed for them, or "not_queued" if neither.
 func (q *Queue) Status(playerID string) (status string, entry *QueueEntry) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -104,9 +89,6 @@ func (q *Queue) Status(playerID string) (status string, entry *QueueEntry) {
 	return "not_queued", nil
 }
 
-// Run periodically checks the waiting queue and forms matches once
-// enough players are waiting. Blocks until ctx is cancelled — intended
-// to run on its own goroutine.
 func (q *Queue) Run(ctx context.Context, tick <-chan time.Time) {
 	for {
 		select {
@@ -118,6 +100,10 @@ func (q *Queue) Run(ctx context.Context, tick <-chan time.Time) {
 	}
 }
 
+// tryFormMatch discovers currently-live instances from the registry
+// and tries each in order until one accepts the match. If none accept
+// (including if none are currently registered at all), the players
+// are put back in the queue to retry on the next tick.
 func (q *Queue) tryFormMatch(ctx context.Context) {
 	q.mu.Lock()
 	if len(q.waiting) < MinPlayersPerMatch {
@@ -129,30 +115,55 @@ func (q *Queue) tryFormMatch(ctx context.Context) {
 	q.waiting = q.waiting[MinPlayersPerMatch:]
 	q.mu.Unlock()
 
-	matchID := uuid.New().String()
-
-	resp, err := q.gameClient.StartMatch(ctx, &genproto.MatchRequest{
-		MatchId:   matchID,
-		PlayerIds: players,
-	})
-	if err != nil || !resp.Accepted {
-		log.Printf("StartMatch failed for %v: %v", players, err)
-		// Put the players back at the front of the queue to retry.
-		q.mu.Lock()
-		q.waiting = append(players, q.waiting...)
-		q.mu.Unlock()
+	instances, err := q.registry.ListLive(ctx)
+	if err != nil || len(instances) == 0 {
+		log.Printf("no live game instances available for %v: %v", players, err)
+		q.requeue(players)
 		return
 	}
 
-	q.mu.Lock()
-	for _, id := range players {
-		q.matched[id] = &QueueEntry{
-			PlayerID:   id,
-			MatchID:    matchID,
-			ServerAddr: resp.ServerAddr,
-		}
-	}
-	q.mu.Unlock()
+	matchID := uuid.New().String()
 
-	log.Printf("match %s formed with players %v on %s", matchID, players, resp.ServerAddr)
+	for _, inst := range instances {
+		conn, err := grpc.NewClient(inst.GRPCAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			log.Printf("dialing %s failed: %v", inst.GRPCAddr, err)
+			continue
+		}
+		client := genproto.NewGameServiceClient(conn)
+
+		callCtx, cancel := context.WithTimeout(ctx, startMatchTimeout)
+		resp, err := client.StartMatch(callCtx, &genproto.MatchRequest{
+			MatchId:   matchID,
+			PlayerIds: players,
+		})
+		cancel()
+
+		if err != nil || !resp.Accepted {
+			log.Printf("StartMatch on %s failed for %v: %v", inst.ID, players, err)
+			continue
+		}
+
+		q.mu.Lock()
+		for _, id := range players {
+			q.matched[id] = &QueueEntry{
+				PlayerID:   id,
+				MatchID:    matchID,
+				ServerAddr: resp.ServerAddr,
+			}
+		}
+		q.mu.Unlock()
+
+		log.Printf("match %s formed with players %v on %s", matchID, players, resp.ServerAddr)
+		return
+	}
+
+	log.Printf("all %d live instances rejected match for %v", len(instances), players)
+	q.requeue(players)
+}
+
+func (q *Queue) requeue(players []string) {
+	q.mu.Lock()
+	q.waiting = append(players, q.waiting...)
+	q.mu.Unlock()
 }

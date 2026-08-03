@@ -4,27 +4,26 @@ import (
 	"context"
 	"log"
 	"net/http"
-	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"nodefall/shared/config"
 	"nodefall/shared/middleware"
+	"nodefall/shared/registry"
 )
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	gameAddr := os.Getenv("NODEFALL_GAME_GRPC_ADDR")
-	if gameAddr == "" {
-		gameAddr = "localhost:9090"
+	cfg := config.Load()
+	if cfg.RedisURL == "" {
+		log.Fatal("NODEFALL_REDIS_URL not set — matchmaker requires Redis for service discovery")
 	}
+	reg := registry.New(cfg.RedisURL)
 
-	queue, err := NewQueue(gameAddr)
-	if err != nil {
-		log.Fatalf("connecting to game service: %v", err)
-	}
+	queue := NewQueue(reg)
 
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
