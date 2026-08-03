@@ -15,6 +15,16 @@ services:
       timeout: 3s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
   auth:
     build:
       context: .
@@ -28,15 +38,35 @@ services:
     ports:
       - "8082:8082"
 
-  game:
+  game-1:
     build:
       context: .
       dockerfile: services/game/Dockerfile
     environment:
       NODEFALL_JWT_SECRET: local-dev-secret-do-not-use-in-prod
+      NODEFALL_INSTANCE_ID: game-1
+      NODEFALL_REDIS_URL: redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
     ports:
       - "8081:8081"
       - "9090:9090"
+
+  game-2:
+    build:
+      context: .
+      dockerfile: services/game/Dockerfile
+    environment:
+      NODEFALL_JWT_SECRET: local-dev-secret-do-not-use-in-prod
+      NODEFALL_INSTANCE_ID: game-2
+      NODEFALL_REDIS_URL: redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8091:8081"
+      - "9091:9090"
 
   matchmaker:
     build:
@@ -44,9 +74,10 @@ services:
       dockerfile: services/matchmaker/Dockerfile
     environment:
       NODEFALL_JWT_SECRET: local-dev-secret-do-not-use-in-prod
-      NODEFALL_GAME_GRPC_ADDR: game:9090
+      NODEFALL_REDIS_URL: redis:6379
     depends_on:
-      - game
+      redis:
+        condition: service_healthy
     ports:
       - "8083:8083"
 
@@ -56,7 +87,8 @@ services:
       dockerfile: Dockerfile
     depends_on:
       - auth
-      - game
+      - game-1
+      - game-2
       - matchmaker
     ports:
       - "80:80"
