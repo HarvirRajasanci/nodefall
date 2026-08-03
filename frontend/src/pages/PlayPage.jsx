@@ -1,8 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { Navigate, Link, useSearchParams } from "react-router-dom";
+import { Navigate, Link, useSearchParams, useNavigate } from "react-router-dom";
 import { useAuth } from "../authContext";
-
-const GAME_WS_URL = `ws://${window.location.host}/ws`;
 
 const PLAYER_RADIUS = 16;
 const BULLET_RADIUS = 6;
@@ -25,6 +23,8 @@ export default function PlayPage() {
   const { token, userID } = useAuth();
   const [searchParams] = useSearchParams();
   const matchID = searchParams.get("match");
+  const serverAddr = searchParams.get("server");
+  const navigate = useNavigate();
   const canvasRef = useRef(null);
   const hudRef = useRef(null);
 
@@ -32,9 +32,10 @@ export default function PlayPage() {
   const [matchPhase, setMatchPhase] = useState("waiting");
   const [countdown, setCountdown] = useState(0);
   const [winner, setWinner] = useState("");
+  const [serverLost, setServerLost] = useState(false);
 
   useEffect(() => {
-    if (!token || !matchID) return;
+    if (!token || !matchID || !serverAddr) return;
 
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
@@ -51,15 +52,24 @@ export default function PlayPage() {
     const input = { dx: 0, dy: 0, angle: 0, shoot: false };
     const keys = {};
 
-    const ws = new WebSocket(
-      `${GAME_WS_URL}?match=${encodeURIComponent(matchID)}&token=${encodeURIComponent(token)}`
-    );
+    let intentionalClose = false;
+
+    const wsURL = `ws://${window.location.host}/ws/${serverAddr}?match=${encodeURIComponent(matchID)}&token=${encodeURIComponent(token)}`;
+    const ws = new WebSocket(wsURL);
 
     ws.onopen = () => {
       setHud(`connected as ${userID?.slice(0, 8)}`);
       setConnectionPhase("connected");
     };
-    ws.onclose = () => setHud("disconnected");
+
+    ws.onclose = () => {
+      setHud("disconnected");
+      if (!intentionalClose) {
+        setServerLost(true);
+        setTimeout(() => navigate("/queue"), 2000);
+      }
+    };
+
     ws.onerror = () => setHud("connection error");
     ws.onmessage = (event) => {
       const next = JSON.parse(event.data);
@@ -211,6 +221,7 @@ export default function PlayPage() {
     animationFrameId = requestAnimationFrame(draw);
 
     return () => {
+      intentionalClose = true;
       cancelAnimationFrame(animationFrameId);
       clearInterval(inputInterval);
       ws.close();
@@ -221,12 +232,12 @@ export default function PlayPage() {
       canvas.removeEventListener("mouseup", handleMouseUp);
       window.removeEventListener("resize", handleResize);
     };
-  }, [token, userID, matchID]);
+  }, [token, userID, matchID, serverAddr, navigate]);
 
   if (!token) {
     return <Navigate to="/login" replace />;
   }
-  if (!matchID) {
+  if (!matchID || !serverAddr) {
     return <Navigate to="/" replace />;
   }
 
@@ -264,7 +275,7 @@ export default function PlayPage() {
         </div>
       )}
 
-      {connectionPhase === "connected" && matchPhase === "waiting" && (
+      {connectionPhase === "connected" && matchPhase === "waiting" && !serverLost && (
         <div className="fixed inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-gray-950/90">
           <div className="text-emerald-400 text-7xl font-mono font-bold tabular-nums">
             {countdown > 0 ? countdown : "GO"}
@@ -275,13 +286,24 @@ export default function PlayPage() {
         </div>
       )}
 
-      {matchPhase === "ended" && (
+      {matchPhase === "ended" && !serverLost && (
         <div className="fixed inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-gray-950/90">
           <div className="text-emerald-400 text-4xl font-mono font-bold tracking-wide">
             {winner === userID ? "YOU WIN" : winner ? "MATCH OVER" : "DRAW"}
           </div>
           <p className="text-gray-500 text-sm font-mono tracking-wide">
             NEXT MATCH STARTING SOON
+          </p>
+        </div>
+      )}
+
+      {serverLost && (
+        <div className="fixed inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-gray-950/95">
+          <div className="text-red-400 text-2xl font-mono font-bold tracking-wide">
+            SERVER CONNECTION LOST
+          </div>
+          <p className="text-gray-500 text-sm font-mono tracking-wide">
+            RETURNING TO MATCHMAKING...
           </p>
         </div>
       )}

@@ -23,7 +23,9 @@ export default function QueuePage() {
         if (cancelled) return;
 
         if (data.status === "matched") {
-          navigate(`/play?match=${encodeURIComponent(data.match_id)}`);
+          navigate(
+            `/play?match=${encodeURIComponent(data.match_id)}&server=${encodeURIComponent(data.server_addr)}`
+          );
           return;
         }
       } catch (err) {
@@ -52,7 +54,7 @@ export default function QueuePage() {
     return () => {
       cancelled = true;
       clearTimeout(pollTimer);
-      leaveQueue(token).catch(() => {}); // best-effort cleanup on unmount
+      leaveQueue(token).catch(() => {});
     };
   }, [token, navigate]);
 
